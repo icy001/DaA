@@ -1,0 +1,23 @@
+{
+  "project": "多市场量化交易系统",
+  "version": "v3.3",
+  "last_update": "2026-10-27 16:45:48",
+  "next_step": 1,
+  "issues": [],
+  "steps": [
+    {"id": 0, "name": "环境与项目骨架", "status": "已完成", "start": "2026-10-27 16:10:00", "done": "2026-10-27 16:45:48", "note": "目录骨架、config/utils/main/test_env/progress/README 全部就绪；test_env.py 58 项全部通过（原 15 个市场用例 + 13 个号段回归用例）；修正 SPY→us_etf；已补丁 get_market_config 统一访问函数、修正3字母代码默认兜底、全依赖已安装；已修正深市个股/场外基金号段误判（000/001/002/003→cn_stock，004~009/519066/16LOF→cn_fund，519 规则提前到 ETF 之前），4000 个深市代码扫描 0 误判；detect_market_type 支持显式 market_type 覆盖；注：GC 仍按国际期货白名单识别为 global_future（与用例一致）"},
+    {"id": 1, "name": "统一数据层", "status": "进行中", "start": "", "done": "", "note": ""},
+    {"id": 2, "name": "行情批量下载导出+K线图绘制（含多周期/形态/缠论/多标的对比）", "status": "未开始", "start": "", "done": "", "note": ""},
+    {"id": 3, "name": "技术指标计算", "status": "未开始", "start": "", "done": "", "note": ""},
+    {"id": 4, "name": "统一账户与订单管理", "status": "未开始", "start": "", "done": "", "note": ""},
+    {"id": 5, "name": "策略基类+因子研究+公开策略接入+自定义因子", "status": "未开始", "start": "", "done": "", "note": ""},
+    {"id": 6, "name": "全市场回测引擎", "status": "未开始", "start": "", "done": "", "note": ""},
+    {"id": 7, "name": "模拟盘交易", "status": "未开始", "start": "", "done": "", "note": ""},
+    {"id": 8, "name": "定时盯盘与消息推送", "status": "未开始", "start": "", "done": "", "note": ""},
+    {"id": 9, "name": "自动复盘报告", "status": "未开始", "start": "", "done": "", "note": ""},
+    {"id": 10, "name": "合格投资者层净值回测+衍生品定价", "status": "未开始", "start": "", "done": "", "note": ""},
+    {"id": 11, "name": "一键运行入口+README+测试框架", "status": "未开始", "start": "", "done": "", "note": ""},
+    {"id": 12, "name": "实盘接入层（QMT/PTrade/CTP+风控+守护+对账+告警+凭证安全）", "status": "未开始", "start": "", "done": "", "note": ""},
+    {"id": 13, "name": "数据与报告长期可用性（多源/原始价/快照/时点成分股/归档）", "status": "未开始", "start": "", "done": "", "note": ""}
+  ]
+}
