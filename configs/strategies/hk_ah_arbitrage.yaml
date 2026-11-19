@@ -1,0 +1,19 @@
+# AH 溢价配对：A/H 溢价 >130 买 H、<110 买回 A（含 HKD→CNY 汇率换算）
+strategy: hk_ah_arbitrage
+params:
+  pairs:
+    "600519": "00700"
+  fx: 0.92
+  premium_buy_h: 130
+  premium_buy_a: 110
+  order_value: 100000
+  lot_size: 100
+symbols:
+  - "600519"
+  - "00700"
+start: "2022-01-01"
+end: "2026-01-01"
+optimize:
+  premium_buy_h: [120, 130, 140]
+  premium_buy_a: [100, 110, 120]
+  fx: [0.9, 0.92, 0.94]

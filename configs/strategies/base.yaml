@@ -1,0 +1,13 @@
+# 策略公共运行参数（5.4）：各策略 yaml 只写差异，命令行 --params 优先级最高。
+# 注意：base.yaml 只是「默认值 + 继承来源」，不会被任何策略直接当成本次运行参数。
+symbols:
+  - "600519"
+  - "510300"
+start: "2023-01-01"
+end: "2026-01-01"
+adjust: "qfq"
+initial_cash: 1000000
+risk:
+  max_single_symbol_pct: 0.3      # 单标的敞口上限（占总权益）
+  stop_loss: 0.08                 # 止损线
+  take_profit: 0.2                # 止盈线

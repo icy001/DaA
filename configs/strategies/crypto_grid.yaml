@@ -1,0 +1,16 @@
+# 加密货币网格：上下 20% 区间挂 20 格，价格穿越网格触发买卖
+strategy: crypto_grid
+params:
+  grid_num: 20
+  price_range_pct: 0.2
+  order_value: 3000
+  max_position_value: 60000
+  qty_decimals: 6
+symbols:
+  - "BTC"
+start: "2023-01-01"
+end: "2026-01-01"
+optimize:
+  grid_num: [10, 20, 30, 50]
+  price_range_pct: [0.1, 0.2, 0.3]
+  order_value: [1000, 3000, 5000]

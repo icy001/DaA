@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% from "_macros.html" import kv_table, data_table, chart_block %}
+
+{% block content %}
+
+{% if report.perf_rows %}
+<h2>策略绩效统计（引擎同源）</h2>
+{{ kv_table(report.perf_rows) }}
+{% endif %}
+
+{{ chart_block(report.charts.equity) }}
+{{ chart_block(report.charts.heatmap) }}
+{{ chart_block(report.charts.pnl_hist) }}
+
+<h2>区间{{ "周" if report.period == "weekly" else "月" }}度概览</h2>
+{{ kv_table(report.overview_rows) }}
+
+<h2>交易盈亏分布</h2>
+{{ kv_table(report.trade_stats_rows) }}
+
+<h2>最大盈利 / 最大亏损交易复盘</h2>
+{{ data_table(["类型", "时间", "标的", "方向", "价格", "数量", "盈亏"],
+              report.extreme_rows, "区间内无成交") }}
+
+<h2>策略参数评估</h2>
+<ul class="tips">
+  {% for item in report.param_review %}<li>{{ item }}</li>{% endfor %}
+</ul>
+
+<h2>信号汇总与被拦截信号（共 {{ report.suppression_total }} 笔）</h2>
+{{ data_table(["拦截原因", "笔数"], report.suppression_count_rows, "无拦截记录") }}
+{% if report.suppression_detail_rows %}
+{{ data_table(["标的", "方向", "原因码", "说明", "来源"], report.suppression_detail_rows) }}
+{% endif %}
+
+{% if report.trap_rows %}
+<h2>风险提示</h2>
+<ul class="tips">
+  {% for item in report.trap_rows %}<li>{{ item }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+{% endblock %}

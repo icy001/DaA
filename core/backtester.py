@@ -1,0 +1,879 @@
+"""第 6 步：全市场透明回测引擎（core/backtester.py）
+
+逐 K 线驱动、不依赖第三方回测框架，每一笔成交都能在日志/CSV 里追溯。设计要点：
+
+【闸门只调用、不重写（6.0）】
+  - `warmup_ok` 由 `core/signal_gate.py::build_bar_dict` 逐标的写入 bar_dict，
+    缺列/NaN 直接报错；
+  - 开仓（buy/short）在 `place_order` 里过预热闸门，平仓（sell/cover）豁免；
+  - 长度门槛 = `max(60, strategy.required_bars())`（`signal_gate.ensure_min_bars`），
+    禁止硬编码 60（MACD required_bars≈135，固定 60 会让 60~70 根标的全段预热、静默零成交）；
+  - 多标的对齐用 `signal_gate.align_frames`，`data_asof_date` / `price_adjust` /
+    `warmup_ok` 三个物化列逐标的保留。
+
+【成交模型 `ExecutionModel`（三引擎共用 `core/execution.py`，通过 account.execution_model 挂载）】
+  - 市价单：买入 = 开盘价×(1+滑点)，卖出 = 开盘价×(1-滑点)；
+  - 涨停买不进 / 跌停卖不出：当日开盘价触及涨跌停即拒单；
+  - 单笔成交量 ≤ 当日成交量 × 市场分档比例（EXECUTION_MODEL.volume_limit_pct_by_market，
+    超出按最小交易单位截断，不足一手拒单）；
+  - 限价单：当日最高/最低价触及限价才成交，成交价取限价（更不利一方）；
+  - T+0/T+1 由 `TradingAccount` 的撮合规则执行（500 现货 T+1、期货/可转债 T+0）；
+  - 手续费/印花税/过户费全部走 `config` 真实费率，回测不设 0 手续费。
+
+【数据准备】
+  - 取日线 → 校验列 → 未来函数检测（列名 lead/next/future 或与次日收益相关性 >0.9 直接报错）
+    → 取交易日交集 → 基准数据（失败只告警）→ 流动性扫描（日均成交额 <500 万告警）。
+
+【结果】
+  - `calc_metrics()`：收益/风险/风险调整/交易/杠杆五类指标 + 分市场、分多空统计；
+  - `plot_results()`：净值 vs 基准、回撤、月度热力图、每笔盈亏分布、持仓市值饼图，
+    杠杆品种额外输出保证金占用与杠杆率曲线；
+  - `save_results()`：trades.csv / equity.csv / metrics.json / *.png；
+  - `detect_traps()`：未来函数、幸存者偏差、过拟合、流动性、滑点五类陷阱提示。
+"""
+from __future__ import annotations
+
+import json
+import logging
+import math
+import re
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+
+import config
+from core import signal_gate
+from core.account import TradingAccount
+from core.execution import ExecutionModel  # 三引擎共用：只调用、不重写
+from core.strategy import BaseStrategy
+from core.utils import setup_logger
+from data import pit_index  # 13.0：点内成分股闸门（禁止当前成分股/关闭 PIT 回测）
+
+__all__ = [
+    "Backtester",
+    "BacktestResult",
+    "ExecutionModel",
+    "calc_metrics",
+    "detect_lookahead",
+    "run",
+]
+
+# 流动性告警阈值：日均成交额 < 500 万
+LIQUIDITY_MIN_AMOUNT = 5_000_000.0
+# 滑点过低提示阈值
+SLIPPAGE_WARN = 0.001
+
+
+# ==================== 未来函数检测 ====================
+
+_LEAD_NAME_RE = r"(^|[_\W])(lead|next|future|fwd|shift)([_\W]|$)"
+
+
+def detect_lookahead(frame: pd.DataFrame, symbol: str = "",
+                     corr_threshold: float = 0.9) -> List[str]:
+    """检测单标的帧里的未来数据泄漏；返回问题描述（空表示通过）。
+
+    两类信号：
+      1) 列名含 lead / next / future / fwd / shift；
+      2) 任意数值列与「次日收益」的相关系数绝对值 > 0.9（说明这一列本身就是未来价）。
+    """
+    problems: List[str] = []
+    if frame is None or len(frame) < 30:
+        return problems
+    for col in frame.columns:
+        if pd.api.types.is_numeric_dtype(frame[col]) and re.search(
+                _LEAD_NAME_RE, str(col), flags=re.IGNORECASE):
+            problems.append(f"{symbol} 列 {col!r} 命名疑似未来数据（lead/next/future）")
+    if "close" not in frame.columns:
+        return problems
+    fwd_ret = frame["close"].pct_change().shift(-1)
+    for col in frame.columns:
+        if not pd.api.types.is_numeric_dtype(frame[col]):
+            continue
+        series = frame[col]
+        if series.nunique(dropna=True) < 5:
+            continue
+        try:
+            corr = series.pct_change().corr(fwd_ret)
+        except (TypeError, ValueError):
+            continue
+        if corr is not None and np.isfinite(corr) and abs(corr) > corr_threshold:
+            problems.append(
+                f"{symbol} 列 {col!r} 与次日收益相关性 {corr:.3f} > {corr_threshold}，疑似未来函数")
+    return problems
+
+
+# ==================== 回测结果 ====================
+
+class BacktestResult:
+    """回测结果容器（策略名、净值、交易、指标、陷阱提示）。"""
+
+    def __init__(self, strategy_name: str, nav: pd.DataFrame, trades: pd.DataFrame,
+                 metrics: dict, traps: List[dict], benchmark: pd.DataFrame = None,
+                 meta: dict = None):
+        self.strategy_name = strategy_name
+        self.nav = nav
+        self.trades = trades
+        self.metrics = metrics
+        self.traps = traps
+        self.benchmark = benchmark if benchmark is not None else pd.DataFrame()
+        self.meta = dict(meta or {})
+
+    def to_dict(self) -> dict:
+        return {"strategy": self.strategy_name, "metrics": self.metrics,
+                "traps": self.traps, "meta": self.meta}
+
+    def report(self) -> str:
+        m = self.metrics
+        lines = [
+            f"===== 回测报告：{self.strategy_name} =====",
+            f"总收益率 {_pct(m.get('total_return'))} | 年化 {_pct(m.get('annual_return'))} "
+            f"| 基准 {_pct(m.get('benchmark_return'))} | 超额 {_pct(m.get('excess_return'))}",
+            f"最大回撤 {_pct(m.get('max_drawdown'))}（{m.get('max_drawdown_days')} 天）"
+            f" | 夏普 {_num(m.get('sharpe'))} | 索提诺 {_num(m.get('sortino'))}"
+            f" | 卡玛 {_num(m.get('calmar'))}",
+            f"交易 {m.get('trade_count')} 笔 | 胜率 {_pct(m.get('win_rate'))}"
+            f" | 盈亏比 {_num(m.get('profit_factor'))} | 平均持仓 {_num(m.get('avg_holding_days'))} 天",
+            f"手续费合计 {_num(m.get('total_commission'))} | 保证金使用率(均) "
+            f"{_pct(m.get('avg_margin_utilization'))} | 爆仓次数 {m.get('margin_call_count')}",
+        ]
+        if self.traps:
+            lines.append("陷阱提示：")
+            lines.extend(f"  [{t['level']}] {t['message']}" for t in self.traps)
+        return "\n".join(lines)
+
+    # -- 落盘 --
+    def save(self, output_dir=None, plot: bool = True) -> Dict[str, str]:
+        out = Path(output_dir or config.BACKTEST_DIR)
+        out.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = f"{self.strategy_name}_{stamp}"
+        paths = {}
+        trade_path = out / f"{base}_trades.csv"
+        self.trades.to_csv(trade_path, index=False, encoding="utf-8-sig")
+        paths["trades"] = str(trade_path)
+        nav_path = out / f"{base}_equity.csv"
+        self.nav.to_csv(nav_path, index=False, encoding="utf-8-sig")
+        paths["equity"] = str(nav_path)
+        metric_path = out / f"{base}_metrics.json"
+        metric_path.write_text(json.dumps({"metrics": self.metrics, "traps": self.traps,
+                                           "meta": self.meta}, ensure_ascii=False,
+                                          indent=2, default=str), encoding="utf-8")
+        paths["metrics"] = str(metric_path)
+        if plot:
+            fig_path = plot_results(self.nav, self.trades, self.metrics, self.benchmark,
+                                    strategy_name=self.strategy_name, save_path=out / f"{base}.png")
+            if fig_path:
+                paths["figure"] = str(fig_path)
+        return paths
+
+
+# ==================== 主引擎 ====================
+
+class Backtester:
+    """逐日驱动的透明回测引擎。"""
+
+    def __init__(self, strategy_class, strategy_params: dict = None, symbols: List[str] = None,
+                 start_date: str = None, end_date: str = None, initial_capital: float = None,
+                 benchmark: str = "000300", market_type: str = None, fetcher=None,
+                 slippage: float = None, max_volume_pct: float = None,
+                 run_mode: str = "backtest", adjust: str = "qfq",
+                 logger: logging.Logger = None, output_dir=None,
+                 liquidate_at_end: bool = True, universe: str = None):
+        if not isinstance(strategy_class, type) or not issubclass(strategy_class, BaseStrategy):
+            raise TypeError("strategy_class 必须是 BaseStrategy 的子类")
+        self.strategy_class = strategy_class
+        self.meta = dict(getattr(strategy_class, "meta", {}) or {})
+        self.params = dict(strategy_params or {})
+        self.universe = str(universe or self.params.get("universe") or "")
+        self.symbols = [str(s) for s in (symbols or self.params.get("symbols") or [])]
+        if not self.symbols and not self.universe:
+            raise ValueError("必须提供 symbols 或 universe")
+        self.start_date = str(start_date or self.params.get("start") or config.DEFAULT_START)
+        self.end_date = str(end_date or self.params.get("end")
+                            or pd.Timestamp.today().strftime("%Y-%m-%d"))
+        self.initial_capital = float(config.INITIAL_CASH if initial_capital is None
+                                      else initial_capital)
+        self.benchmark = str(benchmark or "000300")
+        self.market_type = market_type
+        self.run_mode = str(run_mode)
+        self.adjust = str(adjust or "qfq")
+        self.logger = logger or setup_logger("backtester", config.LOG_DIR / "backtester.log")
+        self.output_dir = Path(output_dir or config.BACKTEST_DIR)
+        self.liquidate_at_end = bool(liquidate_at_end)
+
+        if fetcher is None:
+            from core.data_fetcher import DataFetcher
+            fetcher = DataFetcher()
+        self.fetcher = fetcher
+
+        self.execution = ExecutionModel(slippage=slippage, max_volume_pct=max_volume_pct,
+                                        run_mode=self.run_mode, logger=self.logger)
+
+        # 运行时状态
+        self.frames: Dict[str, pd.DataFrame] = {}
+        self.market_of: Dict[str, str] = {}
+        self.dates: List[pd.Timestamp] = []
+        self.benchmark_frame: Optional[pd.DataFrame] = None
+        self.last_bar_dict: Dict[str, dict] = {}
+        self.min_bars: Optional[int] = None
+        self.strategy: Optional[BaseStrategy] = None
+        self.account: Optional[TradingAccount] = None
+        self.margin_calls = 0
+        self.state = {"date": None}
+        self._prev_close: Dict[str, float] = {}
+        self._lookahead_problems: List[str] = []
+        # match_price_basis=next_*：决策 bar 与成交 bar 分离（订单排队到下一根撮合）
+        self._bar_index = -1
+        self._pending_orders: List[dict] = []
+
+    # ==================== 数据准备 ====================
+
+    def _fetch(self, symbol: str) -> pd.DataFrame:
+        kwargs = dict(start_date=self.start_date, end_date=self.end_date, adjust=self.adjust)
+        market = self.market_of.get(symbol)
+        if market:
+            kwargs["market_type"] = market
+        try:
+            return self.fetcher.get_daily(symbol, **kwargs)
+        except TypeError:
+            kwargs.pop("market_type", None)
+            return self.fetcher.get_daily(symbol, **kwargs)
+
+    def _prepare_symbol(self, symbol: str) -> Optional[pd.DataFrame]:
+        frame = self._fetch(symbol)
+        if frame is None or len(frame) == 0:
+            self.logger.warning("标的 %s 无数据，已跳过", symbol)
+            return None
+        frame = frame.copy()
+        frame.index = pd.to_datetime(frame.index)
+        frame = frame.sort_index()
+        frame = frame[~frame.index.duplicated(keep="last")]
+        required = {"open", "high", "low", "close", "volume"}
+        missing = required - set(frame.columns)
+        if missing:
+            raise ValueError(f"{symbol} 缺少必要列 {sorted(missing)}，无法回测")
+        # 物化列：三引擎必须喂 warmup_ok / data_asof_date / price_adjust
+        if "price_adjust" not in frame.columns:
+            frame["price_adjust"] = self.adjust
+        if "data_asof_date" not in frame.columns:
+            frame["data_asof_date"] = frame.index
+        return frame
+
+    def prepare(self) -> Dict[str, pd.DataFrame]:
+        # 13.0：回测入口强制 PIT 闸门；股票池只允许走带日期的点内成分股
+        pit_index.assert_pit_enabled(self.run_mode)
+        if self.universe:
+            self.symbols = pit_index.get_index_members(self.universe, self.start_date)
+        raw: Dict[str, pd.DataFrame] = {}
+        for symbol in self.symbols:
+            market = self.market_type or config.detect_market_type(symbol)
+            self.market_of[symbol] = market
+            frame = self._prepare_symbol(symbol)
+            if frame is None:
+                continue
+            # 未来函数检测：有问题直接报错，不进入回测
+            problems = detect_lookahead(frame, symbol)
+            if problems:
+                raise ValueError("未来函数检测未通过：" + "；".join(problems))
+            raw[symbol] = frame
+        if not raw:
+            raise RuntimeError("所有标的均无数据，无法回测")
+
+        self._lookahead_problems = []
+        # 对齐交易日交集；三个物化列逐标的保留
+        self.frames = signal_gate.align_frames(raw, how="intersection")
+        self.dates = sorted({d for frame in self.frames.values() for d in frame.index})
+        self._warn_liquidity()
+        self.benchmark_frame = self._fetch_benchmark()
+        return self.frames
+
+    def _fetch_benchmark(self) -> Optional[pd.DataFrame]:
+        if not self.benchmark:
+            return None
+        try:
+            frame = self.fetcher.get_daily(
+                self.benchmark, start_date=self.start_date, end_date=self.end_date,
+                adjust="none", market_type="cn_index")
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("基准 %s 取数失败（%s），基准指标将留空", self.benchmark, exc)
+            return None
+        if frame is None or len(frame) == 0:
+            self.logger.warning("基准 %s 无数据，基准指标将留空", self.benchmark)
+            return None
+        frame = frame.copy()
+        frame.index = pd.to_datetime(frame.index)
+        return frame.sort_index()
+
+    def _warn_liquidity(self) -> None:
+        for symbol, frame in self.frames.items():
+            if "amount" not in frame.columns:
+                continue
+            avg = float(frame["amount"].tail(250).mean() or 0)
+            if 0 < avg < LIQUIDITY_MIN_AMOUNT:
+                self.logger.warning("%s 日均成交额 %.0f 元 < %.0f（流动性风险）",
+                                    symbol, avg, LIQUIDITY_MIN_AMOUNT)
+
+    # ==================== 主循环 ====================
+
+    def _history_provider(self, symbol: str, n: int) -> pd.DataFrame:
+        frame = self.frames.get(str(symbol))
+        if frame is None:
+            raise KeyError(f"策略请求了未加载的标的 {symbol}")
+        asof = self.state["date"]
+        window = frame if asof is None else frame.loc[:asof]
+        return window.tail(int(n)).copy()
+
+    def run(self) -> BacktestResult:
+        if not self.frames:
+            self.prepare()
+
+        self.account = TradingAccount(self.initial_capital, fetcher=self.fetcher,
+                                      run_mode=self.run_mode, logger=self.logger)
+        self.account.execution_model = self.execution
+        self._on_account_ready()
+        strategy = self.strategy_class(
+            account=self.account, data_fetcher=self.fetcher, params=self.params,
+            logger=self.logger, run_mode=self.run_mode,
+            history_provider=self._history_provider)
+        self.strategy = strategy
+        # 6.0 C2：长度门槛 = max(60, strategy.required_bars())，禁止硬编码 60
+        self.min_bars = signal_gate.ensure_min_bars(
+            self._bar_count_for_gate(), strategy=strategy, label="回测")
+        self.logger.info("回测启动：%s symbols=%s %s→%s bars=%d min_bars=%d slippage=%.4f",
+                         self.meta.get("name") or type(strategy).__name__,
+                         self.symbols, self.start_date, self.end_date,
+                         len(self.dates), self.min_bars, self.execution.slippage)
+
+        seen: Dict[str, int] = dict(self._initial_seen())
+        self._pending_orders = []
+        # 撮合时点基准：next_* → 订单排队到下一根 bar；same_* → 同根撮合（unsafe）
+        self.account.deferred_executor = (
+            self._queue_order if self.execution.bar_offset >= 1 else None)
+        for bar_index, date in enumerate(self.dates):
+            self._bar_index = bar_index
+            self.account.current_bar_index = bar_index
+            self.state["date"] = date
+            rows: Dict[str, dict] = {}
+            prices: Dict[str, float] = {}
+            for symbol, frame in self.frames.items():
+                if date not in frame.index:
+                    continue
+                row = frame.loc[date]
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[-1]
+                rows[symbol] = row.to_dict()
+                px = row.get("close")
+                if px is not None and np.isfinite(float(px)) and float(px) > 0:
+                    prices[symbol] = float(px)
+            if not rows:
+                continue
+            signal_gate.advance_seen(seen, rows.keys())
+            bars = signal_gate.build_bar_dict(rows, seen, strategy.warmup_bars, date)
+            self.last_bar_dict = bars
+
+            self.execution.set_context(bars, self._prev_close, bar_index=bar_index)
+            # 0：先撮合上一根 bar 排队的订单（决策 bar#t → 成交 bar#t+1）
+            self._fill_pending_orders(date)
+            # 1-4：策略出信号 → 成交模型撮合（same_* 时同根，next_* 时入队）
+            self._dispatch(date, bars)
+            # 6：保证金检查/强平
+            closed = self.account.check_margin_call(prices)
+            self.margin_calls += len(closed)
+            # 5+7+9：盯市、到期结算、权益快照
+            snapshot = self.account.end_of_day(date, prices)
+            self._enrich_snapshot(snapshot, prices)
+            # 8：日终回调
+            strategy.dispatch_end_of_day(date)
+            self._after_bar(date, prices)
+            self._prev_close = {s: float(b.get("close") or px) for s, b in bars.items()}
+
+        if self._pending_orders:
+            self.logger.warning("回测结束仍有 %d 笔排队订单未撮合（最后一根 bar 的信号无法"
+                                "在下一根成交），已丢弃：%s", len(self._pending_orders),
+                                [o.get("symbol") for o in self._pending_orders])
+            self._pending_orders = []
+        if self.liquidate_at_end:
+            self._liquidate_all()
+        return self._build_result(strategy)
+
+    # ---------- 撮合时点（E1） ----------
+
+    def _queue_order(self, kwargs: dict) -> bool:
+        """账户把订单交给引擎排队：记下决策 bar 下标，下一根 bar 以 fill_now 撮合。"""
+        kwargs = dict(kwargs)
+        kwargs["signal_bar_index"] = self._bar_index
+        self._pending_orders.append(kwargs)
+        return True
+
+    def _fill_pending_orders(self, date) -> None:
+        """用当前 bar 撮合上一根 bar 排队的订单（严禁回填决策当根价格）。"""
+        if not self._pending_orders:
+            return
+        queue, self._pending_orders = self._pending_orders, []
+        for kwargs in queue:
+            symbol = kwargs.get("symbol")
+            kwargs["order_time"] = date
+            frame = self.frames.get(str(symbol))
+            if frame is not None:
+                kwargs["data"] = frame
+            result = self.account.place_order(fill_now=True, **kwargs)
+            if result.get("status") != "filled":
+                self.logger.warning("排队订单 %s %s 未成交：%s", symbol,
+                                    kwargs.get("direction"), result.get("reason"))
+
+    def _on_account_ready(self) -> None:
+        """账户创建完成、策略实例化之前的钩子（模拟盘用它恢复持久化账户）。"""
+
+    def _initial_seen(self) -> Dict[str, int]:
+        """逐标的已见 bar 数初值（模拟盘只跑最近 N 根时用历史根数预热指标）。"""
+        return {}
+
+    def _bar_count_for_gate(self) -> int:
+        """长度门槛使用的 bar 数（模拟盘只交易最近 N 根时仍按全量历史判定）。"""
+        return len(self.dates)
+
+    def _after_bar(self, date, prices: Dict[str, float]) -> None:
+        """日终钩子（模拟盘用它撤当日未成交单、记当日账单）。"""
+
+    def _dispatch(self, date, bars: Dict[str, dict]) -> None:
+        """引擎→策略的唯一入口（子类可加环境差异，但不得绕过 signal_gate）。"""
+        self.strategy.dispatch_bar(date, bars)
+
+    def _enrich_snapshot(self, snapshot: dict, prices: Dict[str, float]) -> None:
+        equity = max(float(snapshot.get("equity") or 0), 1e-9)
+        notional = 0.0
+        for book, sign in ((self.account.positions, 1.0), (self.account.short_positions, 1.0)):
+            for symbol, pos in book.items():
+                px = float(prices.get(symbol, pos.last_price or pos.avg_cost) or 0)
+                notional += abs(pos.volume * px * pos.multiplier) * sign
+        snapshot["notional"] = round(notional, 2)
+        snapshot["margin_utilization"] = round(self.account.margin_used / equity, 6)
+        snapshot["leverage"] = round(notional / equity, 6)
+
+    def _liquidate_all(self) -> None:
+        """回测结束强制平仓（不保留隔夜/过夜持仓）。"""
+        if not self.dates:
+            return
+        day = pd.Timestamp(self.dates[-1]).date()
+        last: Dict[str, float] = {}
+        for symbol, frame in self.frames.items():
+            if len(frame):
+                px = frame["close"].iloc[-1]
+                if pd.notna(px):
+                    last[symbol] = float(px)
+        books = [(self.account.positions, "long"), (self.account.short_positions, "short")]
+        for book, side in books:
+            for symbol, pos in list(book.items()):
+                px = last.get(symbol, pos.last_price or pos.avg_cost)
+                if not px or px <= 0:
+                    continue
+                direction = "sell" if side == "long" else "cover"
+                # 强平直连 _execute：收盘价成交，不受涨跌停/成交量上限阻挡（结果不留持仓）
+                res = self.account._execute(
+                    symbol=symbol, market=pos.market,
+                    rule=self.account._rule_of(pos.market, symbol), kind=pos.kind,
+                    action="close", side=side, direction=direction, volume=pos.volume,
+                    price=float(px), day=day, order_time=None, is_etf=None,
+                    underlying_price=None, hold_days=None, option_type=None,
+                    strike=None, expiry=None)
+                if res.get("status") != "filled":
+                    self.logger.warning("回测结束强平失败 %s：%s", symbol, res.get("reason"))
+        if self.account.daily_equity:
+            self.account.daily_equity[-1]["equity"] = round(
+                self.account.calc_equity(last), 2)
+
+    # ==================== 结果 ====================
+
+    def _build_result(self, strategy: BaseStrategy) -> BacktestResult:
+        nav = pd.DataFrame(self.account.daily_equity)
+        if len(nav):
+            nav["date"] = pd.to_datetime(nav["date"])
+        trades = pd.DataFrame(self.account.trades)
+        benchmark = self._benchmark_nav(nav)
+        metrics = calc_metrics(nav, trades, benchmark=benchmark,
+                               initial_capital=self.initial_capital,
+                               margin_call_count=self.margin_calls)
+        name = self.meta.get("name") or type(strategy).__name__
+        result = BacktestResult(name, nav, trades, metrics, [],
+                                benchmark=benchmark,
+                                meta={"symbols": self.symbols,
+                                      "start": self.start_date, "end": self.end_date,
+                                      "params": dict(strategy.params),
+                                      "min_bars": self.min_bars,
+                                      "slippage": self.execution.slippage})
+        result.traps = self.detect_traps(result)
+        return result
+
+    def _benchmark_nav(self, nav: pd.DataFrame) -> pd.DataFrame:
+        if self.benchmark_frame is None or not len(nav) or "date" not in nav.columns:
+            return pd.DataFrame()
+        frame = self.benchmark_frame.loc[
+            (self.benchmark_frame.index >= nav["date"].iloc[0])
+            & (self.benchmark_frame.index <= nav["date"].iloc[-1])]
+        if not len(frame):
+            return pd.DataFrame()
+        base = float(frame["close"].iloc[0]) or 1.0
+        out = pd.DataFrame({
+            "date": frame.index,
+            "benchmark_equity": frame["close"].values / base * self.initial_capital,
+        })
+        return out
+
+    # ==================== 陷阱检测 ====================
+
+    def detect_traps(self, result: BacktestResult) -> List[dict]:
+        traps: List[dict] = []
+
+        # 1) 未来函数（数据准备已硬校验，这里再确认一次）
+        again = []
+        for symbol, frame in self.frames.items():
+            again.extend(detect_lookahead(frame, symbol))
+        if again:
+            traps.append({"code": "lookahead", "level": "ERROR", "message": "；".join(again)})
+
+        # 2) 幸存者偏差
+        traps.append({
+            "code": "survivorship", "level": "WARN",
+            "message": "仅用当前 symbols 列表回测，已退市/停牌标的未纳入，结果存在幸存者偏差",
+        })
+
+        # 3) 过拟合
+        params = result.meta.get("params") or {}
+        n_trades = int(result.metrics.get("trade_count") or 0)
+        if len(params) >= 6 and n_trades < 30:
+            traps.append({
+                "code": "overfit", "level": "WARN",
+                "message": f"参数 {len(params)} 个但仅 {n_trades} 笔交易，过拟合风险高；"
+                           f"建议做参数平原/走向前验证",
+            })
+
+        # 4) 流动性
+        thin = []
+        for symbol, frame in self.frames.items():
+            if "amount" not in frame.columns:
+                continue
+            avg = float(frame["amount"].tail(250).mean() or 0)
+            if 0 < avg < LIQUIDITY_MIN_AMOUNT:
+                thin.append(f"{symbol}({avg / 1e4:.0f}万)")
+        if thin:
+            traps.append({"code": "liquidity", "level": "WARN",
+                          "message": "日均成交额 <500 万：" + "、".join(thin)})
+
+        # 5) 滑点
+        if self.execution.slippage < SLIPPAGE_WARN:
+            traps.append({
+                "code": "slippage", "level": "WARN",
+                "message": f"滑点 {self.execution.slippage:.4%} 偏低，实盘可能更大",
+            })
+
+        # 附：成交模型统计（便于判断是否过度乐观）
+        if self.execution.capped_orders:
+            traps.append({
+                "code": "volume_cap", "level": "INFO",
+                "message": f"{self.execution.capped_orders} 笔委托按当日成交量 1% 截断",
+            })
+        if self.execution.limit_rejects:
+            traps.append({
+                "code": "price_limit", "level": "INFO",
+                "message": f"{self.execution.limit_rejects} 笔委托因涨跌停未能成交",
+            })
+        return traps
+
+
+# ==================== 绩效指标 ====================
+
+def calc_metrics(nav: pd.DataFrame, trades: pd.DataFrame, benchmark: pd.DataFrame = None,
+                 initial_capital: float = None, annual_days: int = 252,
+                 margin_call_count: int = 0) -> dict:
+    """收益/风险/风险调整/交易/杠杆五类指标 + 分市场、分多空统计。"""
+    metrics: dict = {}
+    if nav is None or not len(nav):
+        return metrics
+    nav = nav.copy()
+    if "date" in nav.columns:
+        nav["date"] = pd.to_datetime(nav["date"])
+    equity = pd.to_numeric(nav["equity"], errors="coerce").ffill().dropna()
+    if not len(equity):
+        return metrics
+    start_equity = float(initial_capital or equity.iloc[0])
+    total_return = float(equity.iloc[-1] / start_equity - 1.0)
+    days = max(len(equity), 1)
+    years = days / float(annual_days)
+    annual_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0.0
+    rets = equity.pct_change().dropna()
+
+    metrics.update({
+        "total_return": total_return,
+        "annual_return": float(annual_return),
+        "days": days,
+        "final_equity": float(equity.iloc[-1]),
+    })
+
+    # ---- 基准 / 超额 / 信息比率 ----
+    if benchmark is not None and len(benchmark):
+        bench = pd.to_numeric(benchmark["benchmark_equity"], errors="coerce").dropna()
+        if len(bench) >= 2:
+            bench_return = float(bench.iloc[-1] / benchmark["benchmark_equity"].iloc[0] - 1.0)
+            metrics["benchmark_return"] = bench_return
+            metrics["excess_return"] = total_return - bench_return
+            aligned = pd.concat([equity.reset_index(drop=True),
+                                 bench.reset_index(drop=True)], axis=1).dropna()
+            if len(aligned) > 2:
+                diff = aligned.iloc[:, 0].pct_change().dropna() - \
+                    aligned.iloc[:, 1].pct_change().dropna()
+                std = float(diff.std(ddof=1))
+                metrics["information_ratio"] = (float(diff.mean()) / std * math.sqrt(annual_days)
+                                                if std > 0 else None)
+    else:
+        metrics["benchmark_return"] = None
+        metrics["excess_return"] = None
+
+    # ---- 回撤 ----
+    peak = equity.cummax()
+    dd = equity / peak - 1.0
+    max_dd = float(dd.min())
+    metrics["max_drawdown"] = max_dd
+    if max_dd < 0:
+        end_idx = int(dd.idxmin())
+        start_idx = int(equity.loc[:end_idx].idxmax()) if end_idx > 0 else 0
+        dates = nav["date"] if "date" in nav.columns else pd.Series(range(len(equity)))
+        metrics["max_drawdown_start"] = str(dates.iloc[start_idx].date()
+                                            if hasattr(dates.iloc[start_idx], "date")
+                                            else dates.iloc[start_idx])
+        metrics["max_drawdown_end"] = str(dates.iloc[end_idx].date()
+                                          if hasattr(dates.iloc[end_idx], "date")
+                                          else dates.iloc[end_idx])
+        metrics["max_drawdown_days"] = max(end_idx - start_idx, 0)
+    else:
+        metrics["max_drawdown_start"] = metrics["max_drawdown_end"] = None
+        metrics["max_drawdown_days"] = 0
+
+    # ---- 风险 / 风险调整 ----
+    std = float(rets.std(ddof=1)) if len(rets) > 1 else 0.0
+    metrics["annual_volatility"] = std * math.sqrt(annual_days)
+    downside = rets[rets < 0]
+    down_std = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
+    metrics["downside_risk"] = down_std * math.sqrt(annual_days)
+    metrics["sharpe"] = (float(rets.mean()) / std * math.sqrt(annual_days)
+                         if std > 0 else None)
+    metrics["sortino"] = (float(rets.mean()) / down_std * math.sqrt(annual_days)
+                          if down_std > 0 else None)
+    metrics["calmar"] = (annual_return / abs(max_dd) if max_dd < 0 else None)
+
+    # ---- 交易统计 ----
+    metrics.update(_trade_stats(trades, initial_capital=start_equity))
+    metrics["margin_call_count"] = int(margin_call_count or 0)
+
+    # ---- 杠杆 ----
+    if "leverage" in nav.columns:
+        lev = pd.to_numeric(nav["leverage"], errors="coerce").dropna()
+        metrics["avg_leverage"] = float(lev.mean()) if len(lev) else None
+        metrics["max_leverage"] = float(lev.max()) if len(lev) else None
+    else:
+        metrics["avg_leverage"] = metrics["max_leverage"] = None
+    if "margin_utilization" in nav.columns:
+        mu = pd.to_numeric(nav["margin_utilization"], errors="coerce").dropna()
+        metrics["avg_margin_utilization"] = float(mu.mean()) if len(mu) else 0.0
+        metrics["max_margin_utilization"] = float(mu.max()) if len(mu) else 0.0
+    else:
+        metrics["avg_margin_utilization"] = metrics["max_margin_utilization"] = 0.0
+
+    return metrics
+
+
+def _trade_stats(trades: pd.DataFrame, initial_capital: float = None) -> dict:
+    empty = {
+        "trade_count": 0, "closed_trade_count": 0, "win_rate": 0.0,
+        "profit_factor": None, "avg_trade_pnl": 0.0, "avg_trade_return": 0.0,
+        "avg_holding_days": 0.0, "max_consecutive_losses": 0,
+        "max_win": 0.0, "max_loss": 0.0, "total_commission": 0.0,
+        "by_market": {}, "by_direction": {},
+    }
+    if trades is None or not len(trades):
+        return empty
+    df = trades.copy()
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    for col in ("pnl", "commission"):
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    if "action" not in df.columns:
+        df["action"] = ""
+
+    closed = df[df.get("action").astype(str).str.lower() == "close"].copy()
+    wins = closed[closed["pnl"] > 0]
+    losses = closed[closed["pnl"] < 0]
+    gross_win = float(wins["pnl"].sum())
+    gross_loss = float(losses["pnl"].sum())
+
+    stats = {
+        "trade_count": int(len(df[df.get("action").astype(str).str.lower() == "open"])),
+        "closed_trade_count": int(len(closed)),
+        "win_rate": float(len(wins) / len(closed)) if len(closed) else 0.0,
+        "profit_factor": (gross_win / abs(gross_loss)) if gross_loss < 0 else None,
+        "avg_trade_pnl": float(closed["pnl"].mean()) if len(closed) else 0.0,
+        "avg_trade_return": (float(closed["pnl"].mean()) / initial_capital
+                             if len(closed) and initial_capital else 0.0),
+        "avg_holding_days": _avg_holding_days(df),
+        "max_consecutive_losses": _max_consecutive_losses(closed["pnl"].tolist()),
+        "max_win": float(closed["pnl"].max()) if len(closed) else 0.0,
+        "max_loss": float(closed["pnl"].min()) if len(closed) else 0.0,
+        "total_commission": float(df["commission"].sum()),
+        "by_market": _group_stats(closed, "market"),
+        "by_direction": _group_stats(closed, "direction"),
+    }
+    return stats
+
+
+def _avg_holding_days(df: pd.DataFrame) -> float:
+    if "timestamp" not in df.columns:
+        return 0.0
+    held: List[float] = []
+    opened: Dict[str, list] = defaultdict(list)
+    for _, row in df.sort_values("timestamp").iterrows():
+        symbol = str(row.get("symbol"))
+        action = str(row.get("action")).lower()
+        ts = row.get("timestamp")
+        if pd.isna(ts):
+            continue
+        if action == "open":
+            opened[symbol].append(ts)
+        elif action == "close" and opened[symbol]:
+            start = opened[symbol].pop(0)
+            held.append(max((ts - start).total_seconds() / 86400.0, 0.0))
+    return float(np.mean(held)) if held else 0.0
+
+
+def _max_consecutive_losses(pnls: List[float]) -> int:
+    best = cur = 0
+    for pnl in pnls:
+        if pnl < 0:
+            cur += 1
+            best = max(best, cur)
+        else:
+            cur = 0
+    return best
+
+
+def _group_stats(closed: pd.DataFrame, key: str) -> dict:
+    if closed is None or not len(closed) or key not in closed.columns:
+        return {}
+    out = {}
+    for name, group in closed.groupby(key):
+        wins = group[group["pnl"] > 0]
+        out[str(name)] = {
+            "count": int(len(group)),
+            "win_rate": float(len(wins) / len(group)) if len(group) else 0.0,
+            "pnl": float(group["pnl"].sum()),
+            "commission": float(group["commission"].sum()),
+        }
+    return out
+
+
+# ==================== 可视化 ====================
+
+def plot_results(nav: pd.DataFrame, trades: pd.DataFrame, metrics: dict,
+                 benchmark: pd.DataFrame = None, strategy_name: str = "strategy",
+                 save_path=None):
+    """生成回测图；matplotlib 缺失时返回 None 并告警，不中断回测。"""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger("backtester").warning("matplotlib 不可用（%s），跳过绘图", exc)
+        return None
+    if nav is None or not len(nav):
+        return None
+    from core.chart import setup_chinese_font
+    setup_chinese_font()
+
+    df = nav.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    equity = pd.to_numeric(df["equity"], errors="coerce")
+    dd = equity / equity.cummax() - 1.0
+    leveraged = bool(df.get("margin_utilization", pd.Series(dtype=float)).fillna(0).max() > 0)
+
+    n_rows = 4
+    fig, axes = plt.subplots(n_rows, 1, figsize=(12, 3.2 * n_rows), sharex=False)
+    # 1) 净值 vs 基准
+    axes[0].plot(df["date"], equity, label="策略净值", color="#1f77b4")
+    if benchmark is not None and len(benchmark):
+        bench = benchmark.copy()
+        bench["date"] = pd.to_datetime(bench["date"])
+        axes[0].plot(bench["date"], bench["benchmark_equity"], label="基准", color="#999999",
+                     linestyle="--")
+    axes[0].set_title(f"{strategy_name} 净值曲线")
+    axes[0].legend()
+    # 2) 回撤
+    axes[1].fill_between(df["date"], dd.values, 0, color="#d62728", alpha=0.35)
+    axes[1].set_title(f"回撤（最大 {metrics.get('max_drawdown', 0):.2%}）")
+    # 3) 月度收益热力图
+    monthly = equity.pct_change().groupby(df["date"].dt.to_period("M")).apply(
+        lambda s: (1 + s).prod() - 1)
+    if len(monthly):
+        axes[2].bar(monthly.index.astype(str), monthly.values,
+                    color=["#2ca02c" if v >= 0 else "#d62728" for v in monthly.values])
+        axes[2].set_title("月度收益")
+        axes[2].tick_params(axis="x", rotation=90, labelsize=7)
+    # 4) 每笔交易盈亏
+    if trades is not None and len(trades):
+        closed = trades[trades.get("action").astype(str).str.lower() == "close"]
+        if len(closed):
+            axes[3].bar(range(len(closed)), pd.to_numeric(closed["pnl"], errors="coerce").fillna(0),
+                        color=["#2ca02c" if v >= 0 else "#d62728"
+                               for v in pd.to_numeric(closed["pnl"], errors="coerce").fillna(0)])
+        axes[3].set_title("每笔平仓盈亏")
+    else:
+        axes[3].set_title("每笔平仓盈亏（无交易）")
+
+    fig.tight_layout()
+    path = Path(save_path) if save_path else (
+        Path(config.BACKTEST_DIR) / "charts" / f"{strategy_name}.png")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=140)
+    plt.close(fig)
+
+    if leveraged:
+        _plot_leverage(df, strategy_name, path)
+    return path
+
+
+def _plot_leverage(df: pd.DataFrame, strategy_name: str, path: Path):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:  # noqa: BLE001
+        return
+    fig, ax1 = plt.subplots(figsize=(12, 3.2))
+    ax1.plot(df["date"], df["margin_utilization"], color="#ff7f0e", label="保证金使用率")
+    ax1.set_ylabel("保证金使用率")
+    ax2 = ax1.twinx()
+    ax2.plot(df["date"], df["leverage"], color="#1f77b4", linestyle="--", label="杠杆率")
+    ax2.set_ylabel("杠杆率")
+    ax1.set_title(f"{strategy_name} 保证金/杠杆")
+    fig.tight_layout()
+    fig.savefig(path.with_name(path.stem + "_leverage.png"), dpi=140)
+    plt.close(fig)
+
+
+# ==================== 工具 ====================
+
+def _pct(value) -> str:
+    return f"{value:.2%}" if isinstance(value, (int, float)) and np.isfinite(value) else "—"
+
+
+def _num(value) -> str:
+    return f"{value:.3f}" if isinstance(value, (int, float)) and np.isfinite(value) else "—"
+
+
+def run(strategy_class, **kwargs) -> BacktestResult:
+    """便捷入口：`run(MyStrategy, symbols=[...], start_date=..., end_date=...)`。"""
+    return Backtester(strategy_class, **kwargs).run()

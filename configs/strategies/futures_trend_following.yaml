@@ -1,0 +1,19 @@
+# 期货趋势跟踪：20 日唐奇安突破开仓、10 日反向突破平仓、ATR(20) 控制单笔风险 1%
+strategy: futures_trend_following
+params:
+  entry_window: 20
+  exit_window: 10
+  atr_window: 20
+  risk_pct: 0.01
+  multiplier: 10
+  capital: 1000000
+  adjust: "qfq"
+  max_lots: 100
+symbols:
+  - "rb2510"
+start: "2022-01-01"
+end: "2026-01-01"
+optimize:
+  entry_window: [10, 20, 30, 55]
+  exit_window: [5, 10, 20]
+  risk_pct: [0.005, 0.01, 0.02]

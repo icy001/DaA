@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% from "_macros.html" import kv_table, data_table, chart_block %}
+
+{% block content %}
+
+<div class="banner warn">
+  披露类型：{{ report.run_mode_label }}（{{ report.run_mode }}） ·
+  净值口径：{{ report.layer }} ·
+  产品类型：{{ report.product_type }} ·
+  披露频率：{{ report.disclosure_frequency }} ·
+  披露滞后：{{ report.disclosure_lag_days }} 天
+</div>
+
+<h2>披露区间与净值口径</h2>
+{{ kv_table(report.period_rows) }}
+{{ kv_table(report.layer_rows) }}
+
+{{ chart_block(report.charts.equity) }}
+
+<h2>绩效指标（与引擎同源）</h2>
+{{ kv_table(report.perf_rows) }}
+
+<h2>费用明细（五类齐全）</h2>
+{{ kv_table(report.fee_rows) }}
+
+<h2>业绩报酬计提明细（逐投资者高水位）</h2>
+{{ data_table(["日期", "投资者", "类型", "计提金额", "高水位", "净值"],
+              report.performance_fee_rows, "本期无业绩报酬计提") }}
+
+<h2>业绩报酬与投资者层净值对账</h2>
+{{ kv_table(report.reconcile_rows) }}
+
+<h2>信号汇总与被拦截信号（共 {{ report.suppression_total }} 笔）</h2>
+{{ data_table(["拦截原因", "笔数"], report.suppression_count_rows, "无拦截记录") }}
+{{ data_table(["标的", "方向", "原因代码", "原因", "来源"], report.suppression_detail_rows,
+              "无被拦截信号") }}
+
+<h2>合格投资者审计留痕</h2>
+{% if not report.qi_audit_ok %}
+<p class="note">未取得完整适当性审计记录，本材料不得用于对外宣传或募集。</p>
+{% endif %}
+{{ data_table(["时间", "动作", "结论", "规则", "原因"], report.qi_audit_rows, "暂无审计记录") }}
+
+<h2>规则状态（2026）</h2>
+{{ data_table(["规则", "状态", "发布日期", "施行日期", "说明"], report.policy_rows) }}
+
+<h2>风险揭示</h2>
+{{ kv_table(report.risk_rows) }}
+
+<p class="note">{{ report.disclosure_notice }}</p>
+
+{% endblock %}

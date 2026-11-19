@@ -52,6 +52,26 @@ MARKET_CASES = [
     ("512880", "cn_etf", "沪市 ETF"),
     ("588000", "cn_etf", "科创 ETF"),
     ("159915", "cn_etf", "深市 ETF"),
+    # ---- 指数（SH/SZ + 6 位，前缀须命中指数号段；必须先于期货判定）----
+    ("sh000300", "cn_index", "沪深300指数（带前缀）"),
+    ("sh000001", "cn_index", "上证指数（带前缀）"),
+    ("sz399001", "cn_index", "深证成指（带前缀）"),
+    ("sh880001", "cn_index", "通达信行业指数段 880"),
+    # ---- 裸 6 位指数（无歧义段才可裸识别）----
+    ("399001", "cn_index", "裸 深证成指（399 段不与个股冲突）"),
+    ("399006", "cn_index", "裸 创业板指"),
+    ("399673", "cn_index", "裸 创业板50"),
+    ("932000", "cn_index", "裸 中证2000（932 段）"),
+    # ---- 裸 000xxx 段与深市个股完全重合 → 维持个股优先，指数必须带前缀 ----
+    ("000300", "cn_stock", "裸 000300 歧义 → 按深市个股处理（指数请传 sh000300）"),
+    ("000905", "cn_stock", "裸 000905 歧义 → 深市个股"),
+    ("000016", "cn_stock", "裸 000016 歧义 → 深康佳A"),
+    ("000688", "cn_stock", "裸 000688 歧义 → 国城矿业"),
+    ("sh000905", "cn_index", "中证500指数（带前缀）"),
+    # ---- 带前缀但非指数的回归（剥前缀后按标准 6 位规则重判）----
+    ("sh600519", "cn_stock", "带前缀 A股个股"),
+    ("sh510300", "cn_etf", "带前缀 ETF"),
+    ("sz000001", "cn_stock", "带前缀 深市主板"),
     # ---- 显式传参覆盖（第 4 项为 market_type 覆盖值）----
     ("000001", "cn_fund", "显式传参消解歧义", "cn_fund"),
 ]
@@ -108,6 +128,8 @@ def check_config() -> None:
         print(f"      支持的市场类型（共 {len(MARKET_NAMES)} 类）：")
         for key, name in MARKET_NAMES.items():
             print(f"        - {key:<16} {name}")
+        check(len(MARKET_NAMES) == 19 and "cn_index" in MARKET_NAMES,
+              "市场类型共 19 类（含 cn_index 指数）", f"实际 {len(MARKET_NAMES)} 类")
     except Exception as exc:  # noqa: BLE001
         check(False, "core.utils.MARKET_NAMES", str(exc))
 

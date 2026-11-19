@@ -1,0 +1,4 @@
+# authority: draft_self_authored
+# 施工方自撰登记（check-config 按黄灯处理；评审方发布后改 reviewer_published）
+f1983b28eac26dde8941c66499a738c21dc571383006902099fdf0a420fc2ce3  test_data.py
+525ce5fdc638e8038df6ad06e6e5e95f9414509071e65b381409452f45b69d69  tests/test_source_adapter.py

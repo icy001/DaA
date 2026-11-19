@@ -1,0 +1,31 @@
+{
+  "meta": {
+    "spec_version": "v3.49",
+    "section": "13.0.20",
+    "authority": "draft_self_authored",
+    "anchor": "historical_peak",
+    "note": "v3.49：基线只记历史峰值（baseline_must_anchor_historical_peak），不得用「瘦身后的当前值」当基线；当前<峰值必须带 recovery_plan（silent_ratchet_down_forbidden）；unit 逐套件登记（pytest 文件=pytest_case，check() 脚本式文件=script_assertion，不以目录一刀切）"
+  },
+  "baselines": {
+    "test_account.py": {"historical_peak": 49, "unit": "script_assertion"},
+    "test_chan.py": {"historical_peak": 32, "unit": "script_assertion"},
+    "test_chart.py": {"historical_peak": 19, "unit": "script_assertion"},
+    "test_data.py": {"historical_peak": 34, "unit": "script_assertion", "bound": 34, "note": "非确定脚本：离线静态上界为字面量 19 + 15 = 34（等价于 FIXED_CHECK_COUNT + len(TARGETS)），双报口径见 13.0.20 ③"},
+    "test_env.py": {"historical_peak": 75, "unit": "script_assertion"},
+    "test_export.py": {"historical_peak": 11, "unit": "script_assertion"},
+    "test_indicators.py": {"historical_peak": 80, "unit": "script_assertion"},
+    "test_paper_trade.py": {"historical_peak": 31, "unit": "script_assertion"},
+    "test_pattern.py": {"historical_peak": 14, "unit": "script_assertion"},
+    "tests/test_alpha101.py": {"historical_peak": 10, "unit": "pytest_case", "recovery_plan": "补齐长历史因子样本后恢复 8 条被 skipped_due_to_source 覆盖的用例：先让数据源侧落独立样本快照，再在 tests/test_alpha101.py 逐条断言数值；在恢复前每次回执显式披露 当前 2 / 峰值 10"},
+    "tests/test_backtest.py": {"historical_peak": 28, "unit": "script_assertion"},
+    "tests/test_custom_factor.py": {"historical_peak": 12, "unit": "script_assertion"},
+    "tests/test_engine_consistency.py": {"historical_peak": 16, "unit": "script_assertion"},
+    "tests/test_factor_strategy.py": {"historical_peak": 14, "unit": "script_assertion"},
+    "tests/test_factor.py": {"historical_peak": 58, "unit": "pytest_case", "recovery_plan": "把停用/跳过的因子用例按数据源可达性拆成离线 fixture 组，先恢复 20 条纯计算类断言，再逐组补回依赖行情的用例；在恢复前每次回执显式披露 当前 6 / 峰值 58"},
+    "tests/test_loader.py": {"historical_peak": 20, "unit": "pytest_case", "recovery_plan": "loader 用例依赖外部数据源可达性；先补齐离线样本夹具（本地 parquet 快照）恢复 8 条，再恢复联网路径用例；在恢复前每次回执显式披露 当前 4 / 峰值 20"},
+    "tests/test_match_price_basis.py": {"historical_peak": 18, "unit": "script_assertion"},
+    "tests/test_research.py": {"historical_peak": 19, "unit": "script_assertion"},
+    "tests/test_signal_gate.py": {"historical_peak": 25, "unit": "script_assertion"},
+    "tests/test_strategy.py": {"historical_peak": 18, "unit": "script_assertion"}
+  }
+}

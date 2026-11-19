@@ -1,0 +1,17 @@
+# 基金定投：每周四定投，低于 MA250 多买、高于少买、高于 20% 停止
+strategy: fund_sip
+params:
+  base_amount: 1000
+  ma_window: 250
+  below_ma_multiplier: 1.5
+  above_ma_multiplier: 0.8
+  stop_above_pct: 0.2
+  weekday: 3
+symbols:
+  - "519066"
+start: "2022-01-01"
+end: "2026-01-01"
+optimize:
+  base_amount: [500, 1000, 2000]
+  below_ma_multiplier: [1.0, 1.5, 2.0]
+  stop_above_pct: [0.15, 0.2, 0.3]

@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% from "_macros.html" import kv_table, data_table, chart_block %}
+
+{% block content %}
+
+{% if report.perf_rows %}
+<h2>绩效指标（引擎同源）</h2>
+{{ kv_table(report.perf_rows) }}
+{% endif %}
+
+{% if report.account_rows %}
+<h2>账户概览</h2>
+{{ kv_table(report.account_rows) }}
+{% endif %}
+
+{{ chart_block(report.charts.equity) }}
+
+<h2>持仓明细</h2>
+{{ data_table(["标的", "方向", "数量", "成本", "现价", "浮动盈亏", "当日涨跌"],
+              report.position_rows, "当前无持仓") }}
+
+<h2>当日交易</h2>
+{{ data_table(["时间", "标的", "市场", "方向", "价格", "数量", "盈亏"],
+              report.trade_rows, "当日无成交") }}
+
+{% if report.market_pnl_rows %}
+<h2>分市场盈亏</h2>
+{{ data_table(["市场", "已实现盈亏", "成交笔数"], report.market_pnl_rows) }}
+{% endif %}
+
+<h2>市场情绪</h2>
+{% if report.sentiment_rows %}
+{{ kv_table(report.sentiment_rows) }}
+{% endif %}
+{% if report.sentiment_note %}
+<p class="note">{{ report.sentiment_note }}</p>
+{% endif %}
+
+<h2>信号汇总与被拦截信号（共 {{ report.suppression_total }} 笔）</h2>
+{{ data_table(["拦截原因", "笔数"], report.suppression_count_rows, "无拦截记录") }}
+{% if report.suppression_detail_rows %}
+<h3>拦截明细（报告必须披露，否则「0 笔交易」会掩盖闸门锁死）</h3>
+{{ data_table(["标的", "方向", "原因码", "说明", "来源"], report.suppression_detail_rows) }}
+{% endif %}
+{% if report.executed_rows %}
+<h3>已执行信号</h3>
+{{ data_table(["时间", "标的", "方向", "价格", "数量"], report.executed_rows) }}
+{% endif %}
+
+<h2>明日候选 / 明日计划（report_plan 第三出口）</h2>
+{{ data_table(["标的", "市场", "收盘", "数据截至日期", "标注"], report.plan_rows, "无候选（全部未过闸门或未提供）") }}
+
+{% if report.excluded_rows %}
+<h3>已排除（不得进入候选清单）</h3>
+{{ data_table(["标的", "市场", "原因码", "标注", "数据截至日期"], report.excluded_rows) }}
+{% endif %}
+
+{% if report.event_rows %}
+<h3>明日关注事件</h3>
+{{ data_table(["事件", "标的", "日期", "说明"], report.event_rows, "暂无登记事件") }}
+{% else %}
+<p class="note">明日关注事件：暂无登记（期权到期 / 期货换月 / 美联储议息 / 财报可由 events= 注入）。</p>
+{% endif %}
+
+<h2>风控检查</h2>
+{{ kv_table(report.risk_rows) }}
+
+{% if report.trap_rows %}
+<h2>风险提示与改进建议</h2>
+<ul class="tips">
+  {% for item in report.trap_rows %}<li>{{ item }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+{% endblock %}

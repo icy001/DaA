@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% from "_macros.html" import kv_table, data_table, chart_block %}
+
+{% block content %}
+
+<h2>策略概述与参数</h2>
+{{ kv_table(report.strategy_rows) }}
+
+<h2>绩效指标</h2>
+{{ kv_table(report.perf_rows) }}
+
+{{ chart_block(report.charts.equity) }}
+{{ chart_block(report.charts.drawdown) }}
+{{ chart_block(report.charts.heatmap) }}
+{{ chart_block(report.charts.pnl_hist) }}
+
+<h2>分年度收益</h2>
+{{ data_table(["年度", "收益率", "年末权益"], report.yearly_rows, "无可用净值数据") }}
+
+<h2>交易明细{% if report.trade_csv %}（<a href="{{ report.trade_csv }}">下载 CSV</a>）{% endif %}</h2>
+{{ data_table(["时间", "标的", "方向", "价格", "数量", "盈亏", "手续费"],
+              report.trade_rows, "无成交") }}
+
+{% if report.trap_rows %}
+<h2>风险提示与改进建议</h2>
+<ul class="tips">
+  {% for item in report.trap_rows %}<li>{{ item }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+{% endblock %}

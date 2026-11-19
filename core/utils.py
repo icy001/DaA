@@ -24,6 +24,9 @@ try:  # 中国节假日（A股/港股/期货日历的基础）
 except ImportError:  # 依赖未安装时退化为仅按周末判断
     _cn_is_holiday = None
 
+# 中国节假日日历是否可用（缺失时无法识别法定节假日，分钟缺口检测必须自行降级）
+CN_CALENDAR_AVAILABLE = _cn_is_holiday is not None
+
 try:
     from zoneinfo import ZoneInfo
 except ImportError:  # Python < 3.9
@@ -47,6 +50,7 @@ NAV_MARKETS = {"private_fund", "asset_management", "otc_deriv", "trust"}
 MARKET_NAMES = {
     "cn_stock": "A股个股",
     "cn_etf": "A股场内ETF",
+    "cn_index": "指数（基准/择时）",
     "us_stock": "美股个股",
     "us_etf": "美股ETF",
     "hk_stock": "港股个股/ETF",
@@ -323,6 +327,11 @@ def setup_logger(name: str = "quant", log_file: Optional[Union[str, Path]] = Non
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
+    try:  # 12.17.4：统一日志脱敏（token/password/资金账号）
+        from core.logger import install_redaction
+        install_redaction(logger)
+    except Exception:  # noqa: BLE001 - 脱敏不可用不能阻断日志
+        pass
     return logger
 
 
@@ -400,6 +409,59 @@ def market_name(market: str) -> str:
     return MARKET_NAMES.get((market or "").lower(), market)
 
 
+# ==================== 周期重采样 ====================
+
+# 周期 → pandas 重采样规则（分钟线不能由日线反推，必须走接口）
+_RESAMPLE_RULES = {"1w": "W-FRI", "1M": "ME"}
+
+
+def re_sample_kline(df, period: str = "1w"):
+    """把日线重采样为周线（1w，W-FRI）/ 月线（1M，ME），不依赖网络。
+
+    聚合规则：open 取首、high 取最大、low 取最小、close 取末、volume/amount 求和；
+    索引仍为 date（周线标签为当周最后一个自然日所在周五，月线为月末）。
+
+    【未来函数红线】最后一根周/月 K 线在周期结束前是「未走完」的：
+    返回时新增 is_complete 列（末根为 False 时），并在 attrs 里写
+    last_bar_incomplete / resampled_from / period；信号与回测必须先丢弃未完成K线。
+    """
+    import pandas as pd
+
+    period = str(period)
+    if period == "1d":
+        return df
+    if period not in _RESAMPLE_RULES:
+        raise ValueError(f"re_sample_kline 仅支持 1d/1w/1M，收到 {period!r}")
+    if df is None or len(df) == 0:
+        return df
+
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    for col in ("volume", "amount"):
+        if col in df.columns:
+            agg[col] = "sum"
+    if "is_suspended" in df.columns:
+        agg["is_suspended"] = "any"  # 周内任一交易日停牌即视为该周停牌
+    out = df.resample(_RESAMPLE_RULES[period]).agg(agg)
+    out = out.dropna(subset=["open", "high", "low", "close"])
+
+    # 周期未结束 → 末根未走完（保守：周期最后一天当日也算未完成）
+    today = pd.Timestamp.now().normalize()
+    last_incomplete = bool(len(out)) and out.index[-1] >= today
+    out["is_complete"] = True
+    if last_incomplete:
+        out.loc[out.index[-1], "is_complete"] = False
+
+    out.attrs.update(getattr(df, "attrs", {}) or {})
+    out.attrs.update({
+        "period": period,
+        "resampled_from": "1d",
+        "last_bar_incomplete": last_incomplete,
+        "resample_note": "本地重采样（日→周/月），非原始行情；末根未走完禁止出信号"
+        if not last_incomplete else "末根K线未走完，信号计算必须丢弃该根",
+    })
+    return out
+
+
 __all__ = [
     "setup_logger",
     "retry_request",
@@ -408,5 +470,6 @@ __all__ = [
     "format_number",
     "cal_natural_days",
     "market_name",
+    "re_sample_kline",
     "MARKET_NAMES",
 ]

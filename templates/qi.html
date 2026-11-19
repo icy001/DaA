@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% from "_macros.html" import kv_table, data_table, chart_block %}
+
+{% block content %}
+
+<div class="banner warn">
+  {{ report.run_mode_label }}材料 · 净值口径 {{ report.layer }} · 数据截至 {{ report.data_asof }}
+  · 披露频率 {{ report.disclosure_frequency }} · 披露滞后 {{ report.disclosure_lag_days }} 天
+</div>
+
+<h2>FOF / 净值组合</h2>
+{{ kv_table(report.period_rows) }}
+{{ kv_table(report.nav_rows) }}
+{{ chart_block(report.charts.equity) }}
+
+{% if report.perf_rows %}
+<h2>绩效指标（与引擎同源）</h2>
+{{ kv_table(report.perf_rows) }}
+{% endif %}
+
+<h2>费用明细（申赎 / 管理 / 业绩报酬 / 托管）</h2>
+{{ data_table(["费用类型", "金额（元）"], report.fee_rows) }}
+
+<h2>业绩报酬计提明细</h2>
+{{ data_table(["日期", "投资者", "计提金额", "高水位", "净值"], report.performance_fee_rows,
+              "无计提（未创高水位或非私募产品）") }}
+
+{% if report.weights_rows %}
+<h2>各产品权重变化</h2>
+{{ data_table(["决策日", "执行日", "目标权重"], report.weights_rows) }}
+{% endif %}
+
+{% if report.lockup_rows %}
+<h2>锁定期分布</h2>
+{{ data_table(["投资者/产品", "起始日", "已持有天数", "锁定期"], report.lockup_rows) }}
+{% endif %}
+
+{% if report.reits_rows %}
+<h2>REITs 持仓</h2>
+{{ data_table(["代码", "收盘价", "净值", "折溢价率", "分派率", "分红到账", "备注"],
+              report.reits_rows, "无 REITs 持仓") }}
+{% endif %}
+
+{% if report.neeq_rows %}
+<h2>新三板持仓</h2>
+{{ data_table(["代码", "涨跌幅", "成交活跃度", "零成交天数", "退市风险"], report.neeq_rows,
+              "无新三板持仓") }}
+{% endif %}
+
+{% if report.deriv_rows or report.scenario_rows %}
+<h2>衍生品模拟（仅模拟账户，个人禁止实盘）</h2>
+{{ data_table(["标的", "结构", "希腊字母敞口", "敲入概率", "敲出概率", "理论价格"],
+              report.deriv_rows, "无模拟持仓") }}
+{{ data_table(["情景", "标的涨跌幅", "损益"], report.scenario_rows, "无情景分析") }}
+<p class="note">本页不提供下单、不对接任何场外交易渠道、不生成可用于实盘的交易信号。</p>
+{% endif %}
+
+<h2>信号汇总与被拦截信号（共 {{ report.suppression_total }} 笔）</h2>
+{{ data_table(["拦截原因", "笔数"], report.suppression_count_rows, "无拦截记录") }}
+
+<h2>合格投资者审计留痕</h2>
+{% if not report.qi_audit_ok %}
+<div class="banner warn">审计留痕不完整：本材料不得对外宣传，须先补齐逐动作校验记录。</div>
+{% endif %}
+{{ data_table(["时间", "动作", "结论", "原因", "审计号"], report.qi_audit_rows, "无审计记录") }}
+
+{% if report.policy_rows %}
+<h2>2026 规则状态</h2>
+{{ data_table(["规则", "状态", "发布日期", "施行日期", "说明"], report.policy_rows) }}
+{% endif %}
+
+<h2>风险揭示</h2>
+<ul class="tips">
+  {% for key, value in report.risk_rows %}<li><strong>{{ key }}</strong>：{{ value }}</li>{% endfor %}
+</ul>
+
+<p class="note">{{ report.disclosure_notice }}</p>
+
+{% endblock %}

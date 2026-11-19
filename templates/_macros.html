@@ -1,0 +1,30 @@
+{% macro kv_table(rows) %}
+<table class="kv">
+  {% for key, value in rows %}
+  <tr><th>{{ key }}</th><td>{{ value }}</td></tr>
+  {% endfor %}
+</table>
+{% endmacro %}
+
+{% macro data_table(headers, rows, empty="无") %}
+<table>
+  <thead>
+    <tr>{% for h in headers %}<th>{{ h }}</th>{% endfor %}</tr>
+  </thead>
+  <tbody>
+    {% if rows %}
+      {% for row in rows %}
+      <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+      {% endfor %}
+    {% else %}
+      <tr><td colspan="{{ headers | length }}" class="empty">{{ empty }}</td></tr>
+    {% endif %}
+  </tbody>
+</table>
+{% endmacro %}
+
+{% macro chart_block(chart) %}
+{% if chart %}
+<section class="chart">{{ chart }}</section>
+{% endif %}
+{% endmacro %}

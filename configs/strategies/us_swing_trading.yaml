@@ -1,0 +1,24 @@
+# 美股波段：RSI 超卖 + MACD 金叉买入，RSI 超买 + 死叉卖出（含 PDT 限制）
+strategy: us_swing_trading
+params:
+  rsi_n: 14
+  rsi_buy: 30
+  rsi_sell: 70
+  oversold_lookback: 10
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  order_qty: 100
+  pdt_enabled: true
+  pdt_max_day_trades: 3
+  pdt_min_equity: 25000
+  equity_hint: 10000
+symbols:
+  - "AAPL"
+  - "MSFT"
+start: "2022-01-01"
+end: "2026-01-01"
+optimize:
+  rsi_buy: [20, 25, 30, 35]
+  rsi_sell: [65, 70, 75, 80]
+  oversold_lookback: [5, 10, 15]

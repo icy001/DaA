@@ -1,0 +1,21 @@
+# 可转债涨停联动：正股涨停/强势时买入对应转债，尾盘清仓（T+0）
+strategy: cb_arbitrage
+params:
+  pairs:
+    "600000": "110059"
+  conversion_price:
+    "110059": 12.92
+  premium_max: 0.2
+  min_amount: 50000000
+  limit_up_pct: 0.097
+  take_profit: 0.05
+  order_value: 100000
+  lot_size: 10
+symbols:
+  - "110059"
+start: "2023-01-01"
+end: "2026-01-01"
+optimize:
+  premium_max: [0.1, 0.2, 0.3]
+  limit_up_pct: [0.09, 0.097, 0.1]
+  order_value: [50000, 100000, 200000]

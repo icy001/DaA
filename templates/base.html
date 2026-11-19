@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }}</title>
+  <style>{{ css }}</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>{{ title }}</h1>
+  <p class="meta">生成时间 {{ generated_at }}{% if report.data_asof %} · 数据截至 {{ report.data_asof }}{% endif %}</p>
+
+  {% if report.zero_trade_text %}
+  <div class="banner warn">{{ report.zero_trade_text }}</div>
+  {% endif %}
+
+  {% block content %}{% endblock %}
+
+  <p class="footer">本报告由多市场量化交易系统自动生成 · 信号/成交/绩效与引擎同源 · 不构成投资建议</p>
+</div>
+</body>
+</html>

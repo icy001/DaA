@@ -1,0 +1,16 @@
+# 双均线交叉：短均线上穿长均线买入、下穿卖出（趋势基线）
+strategy: double_ma_cross
+params:
+  short_window: 5
+  long_window: 20
+  order_value: 100000
+  lot_size: 100
+symbols:
+  - "600519"
+  - "510300"
+start: "2023-01-01"
+end: "2026-01-01"
+# 参数优化搜索范围（第 7 步 run_optimize 使用）
+optimize:
+  short_window: [3, 5, 8, 10]
+  long_window: [15, 20, 30, 60]

@@ -6,6 +6,10 @@
 .env
 .env.*
 !.env.example
+secrets/
+credentials/
+*.key
+*.pem
 
 # ---------- Python ----------
 __pycache__/
@@ -19,6 +23,7 @@ venv/
 
 # ---------- 运行数据与缓存（由程序自动生成） ----------
 data_cache/*
+export/*
 logs/*
 backtest_results/*
 reports/*
@@ -31,5 +36,6 @@ audit_logs/*
 # ---------- 临时与系统文件 ----------
 *.log
 *.tmp
+*.broken
 .DS_Store
 Thumbs.db

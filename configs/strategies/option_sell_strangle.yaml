@@ -1,0 +1,30 @@
+# 期权卖出宽跨式：每月首个交易日 IVR>50 时卖出 delta≈0.2 的两腿，delta>0.5 或临期平仓
+strategy: option_sell_strangle
+params:
+  underlying: "510300"
+  call_symbol: "10004567"
+  put_symbol: "10004568"
+  strike_step: 0.05
+  delta_target: 0.2
+  delta_close: 0.5
+  ivr_threshold: 50
+  ivr_min_samples: 60
+  sigma: 0.2
+  days_to_expiry: 30
+  contracts: 1
+  multiplier: 10000
+  seller_margin_rate:
+    call: 0.12
+    put: 0.07
+  margin_limit: 0.3
+  capital: 1000000
+  close_before_expiry_days: 2
+symbols:
+  - "10004567"
+  - "10004568"
+start: "2023-01-01"
+end: "2026-01-01"
+optimize:
+  delta_target: [0.15, 0.2, 0.3]
+  ivr_threshold: [40, 50, 60]
+  days_to_expiry: [20, 30, 45]

@@ -1,0 +1,20 @@
+# 国债逆回购现金管理：14:50 检查闲置资金，买当日利率最高的逆回购（周四优先 1 天期）
+strategy: repo_cash_management
+params:
+  min_idle: 1000
+  reserve_pct: 0.2
+  repo_symbols:
+    - "131810"
+    - "131811"
+    - "131800"
+  prefer_1day_symbol: "131810"
+  trade_time: "14:50"
+symbols:
+  - "131810"
+  - "131811"
+  - "131800"
+start: "2023-01-01"
+end: "2026-01-01"
+optimize:
+  reserve_pct: [0.1, 0.2, 0.3]
+  min_idle: [1000, 10000, 100000]
