@@ -4,7 +4,15 @@
     "section": "13.0.20",
     "authority": "draft_self_authored",
     "anchor": "historical_peak",
-    "note": "v3.49：基线只记历史峰值（baseline_must_anchor_historical_peak），不得用「瘦身后的当前值」当基线；当前<峰值必须带 recovery_plan（silent_ratchet_down_forbidden）；unit 逐套件登记（pytest 文件=pytest_case，check() 脚本式文件=script_assertion，不以目录一刀切）"
+    "note": "v3.49：基线只记历史峰值（baseline_must_anchor_historical_peak），不得用「瘦身后的当前值」当基线；当前<峰值必须带 recovery_plan（silent_ratchet_down_forbidden）；unit 逐套件登记（pytest 文件=pytest_case，check() 脚本式文件=script_assertion，不以目录一刀切）",
+    "pytest_full_suite": {
+      "historical_peak": 461,
+      "peak_spec_version": "v3.49",
+      "current": 453,
+      "current_spec_version": "v3.52",
+      "unit": "pytest_case",
+      "delta_note": "461→453（差8）流向：①口径差1——v3.49 的 461 为 passed-only（0 skipped），当前为 452 过 + 1 跳（SPEC_PROVENANCE 切 reviewer_published 后 tests/test_spec_check.py 草稿路径用例按设计 skip）；②可考变更——v3.51→v3.52 gov() 治理读点迁移轮共 16 条测试文件 update（见 acceptance_scripts.ledger.jsonl），旧键直读断言随键名废弃删除，marker 机制用例合并后重构拆分（test_missing_marker_warns_by_default 并入 test_missing_required_markers_fails 再拆出 warn 机制用例，净 0）；③逐用例流向不可精确重建——v3.49 测试快照未入 git（历史仅骨架提交），属与「依赖未锁定」同类的不可重建缺口，如实登记；冻结基线锚定历史峰值 461 而非当前 453（silent_ratchet_down_forbidden）"
+    }
   },
   "baselines": {
     "test_account.py": {"historical_peak": 49, "unit": "script_assertion"},

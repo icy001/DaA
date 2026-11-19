@@ -47,3 +47,32 @@ f4352ad965c1fd2cbd699dea5b7bf53695e15b055070bc7e77e50e166707c684  spec_content.s
 - 发布方主张「两机键名无需改名、196/163 是坏表×跨版本产物」——施工方已用两份真实 config 文件的
   grep 与干净目标重算否证（见当轮回执 Test A / Test B），改名清单 config_surface.v352.rename_report.txt
   仍然有效，等待发布方按该报告给出精确改名映射。
+
+## 四、v3.52 结项登记（2026-11-19：同构边界声明 + 不可重建缺口）
+
+### 4.1 「同构」的准确边界
+
+本机达成的同构是 **治理面同构**，不是整机同构：
+
+- 治理面：30 个治理块与发布方血统件逐字同构，cs-v1 surface = 757 元素 /
+  91a67b3752da8f505a86ab5f20c76eaafe6eaca36e15a07a0c211a0aa9929bf7
+  （逐元素清单见 config_surface.elements.txt，两机对账用 comm -3）；
+- 业务面：业务配置块与运行时值（`_USER_CLI_DEFAULTS`、`_GOV_RUNTIME_COMPAT`、
+  data_source_priority、业务参数等）保留本机现值，各机不同。
+
+**已知差异声明**：生产仅一台机器时无碍；若两台机器都跑回测，业务面取值差异
+（数据源优先级、费率、缓存路径等）会导致回测结果不逐字一致，必须按「已知差异」
+对待，不得当作 defect。治理面键集合由 surface 哈希守卫，任何一机治理块被静默
+改动会立即被 91a67b37… 对拍发现。
+
+### 4.2 结项时登记的不可重建缺口（v3.52 结项四项之一）
+
+1. **依赖未锁定（已补）**：本轮 baostock 曾从环境中消失，证明旧「>= 下限」口径
+   不可重建。现已将 requirements.txt 的 26 个关键依赖钉死到实测补丁号（Python
+   3.9.6 实测验证），全量传递依赖快照导出至 requirements.lock.txt（pip freeze，
+   188 项，排除 @ file:/// 本地路径行）。
+2. **v3.49 测试快照未入 git（不可修复，如实登记）**：git 历史仅存骨架提交，
+   461→453 的逐用例流向无法 diff 重建；可考部分（16 条账本 update、marker 用例
+   合并重构、1 项按设计 skip）与不可考部分已登记于
+   suite_baselines.json → meta.pytest_full_suite.delta_note，
+   冻结基线锚定历史峰值 461 而非当前 453（silent_ratchet_down_forbidden）。
