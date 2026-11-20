@@ -1783,7 +1783,7 @@ DATA_VERSIONING = {
 
 # ==== v3.52 治理块（发布方血统；值引用上方业务常量，键名进 surface）====
 
-SPEC_VERSION = "v3.52"
+SPEC_VERSION = "v3.53"
 SPEC_VERSION_CHECK = {
     "enforce_on_startup": True,
     "enforce_in_check_config": True,
@@ -1799,7 +1799,7 @@ SPEC_VERSION_CHECK = {
     "self_lockout_guard": True,                      # spec_check 自身与 check-config 永不因版本不符而失败
     "command_file_globs": ["*指令集*.md"],           # v3.34：不再钉死单一文件名
     "version_header_marker": "<!-- spec_version:",   # 指令集顶部机器可读版本头
-    "must_contain_markers": ["13.0 开工前置", "13.0.13", "13.0.14", "13.0.15", "13.0.16", "13.0.17", "13.0.18", "13.0.19", "13.0.20", "13.0.21", "13.0.22", "13.0.23", "13.13 收尾总检"],  # v3.35 立；v3.43 增 13.0.13；v3.44 增 13.0.14/13.0.15；v3.45 增 13.0.16（数据源适配器 fail-closed）；v3.46 增 13.0.17（13.1 守卫位置/对象错位）；v3.47 增 13.0.18（自证/静默缩减）；v3.48 增 13.0.19（逐套件计数/证据源独立性/draft 默认拒绝）；v3.49 增 13.0.20（surface 算法钉死/基线锚峰值/账本全覆盖/模式矩阵枚举）；v3.50 增 13.0.21（算法机械化+黄金向量/AST 采集/白名单完备性/峰值证据/迁移校验/账本链）
+    "must_contain_markers": ["13.0 开工前置", "13.0.13", "13.0.14", "13.0.15", "13.0.16", "13.0.17", "13.0.18", "13.0.19", "13.0.20", "13.0.21", "13.0.22", "13.0.23", "13.0.24", "13.13 收尾总检"],  # v3.35 立；v3.43 增 13.0.13；v3.44 增 13.0.14/13.0.15；v3.45 增 13.0.16（数据源适配器 fail-closed）；v3.46 增 13.0.17（13.1 守卫位置/对象错位）；v3.47 增 13.0.18（自证/静默缩减）；v3.48 增 13.0.19（逐套件计数/证据源独立性/draft 默认拒绝）；v3.49 增 13.0.20（surface 算法钉死/基线锚峰值/账本全覆盖/模式矩阵枚举）；v3.50 增 13.0.21（算法机械化+黄金向量/AST 采集/白名单完备性/峰值证据/迁移校验/账本链）；v3.53 增 13.0.24（风控参数面/口径面入守护）
     "on_marker_missing": "raise",
     "on_file_not_found": "raise_with_guidance",      # 找不到规格文件 → 报错并提示「去哪取最新规格」
     "allow_suffix": ["-draft"],
@@ -2014,6 +2014,15 @@ RISK = {
         "max_cancel_count_per_day": 30,
         "daily_loss_pct_stop": 0.05,
         "max_drawdown_pct_stop": 0.10,
+        # v3.53 评审裁定：熔断自动恢复是安全参数，必须进治理面（RISK 在 surface
+        # 白名单内）接受哈希守护，禁止只放模块默认（改代码即可绕过、无对拍）。
+        # 语义（两条口径写进规格正文，不在代码里默会）：
+        #   ① halt_recover_stabilize_days：解除熔断所需「连续 N 个交易日权益
+        #      未再创新低（企稳）」——「不创新低」接受持平，弱于「连续上涨」；
+        #   ② 解除日权益即新回撤峰值基准：恢复后须再跌 max_drawdown_pct_stop
+        #      才二次熔断——不清基准会在解除当天被旧峰值再熔（B-1 死锁根源）。
+        "halt_recover_stabilize_days": 3,
+        "halt_recover_enabled": True,
         "max_leverage": {"stock": 1.0, "future": 3.0, "forex": 5.0, "crypto": 3.0},
         "max_single_symbol_pct": 0.20,
         "max_single_industry_pct": 0.30,
@@ -2587,7 +2596,11 @@ CONFIG_SURFACE = {
     "surface_collection_must_be_ast_based": True,
     "dir_based_collection_forbidden": True,
     "surface_expected_counts": {
-        "n_consts": 162, "n_keys_raw": 644, "n_keys_uniq": 591, "n_elements": 752,
+        # v3.53 滚动实测（frozen_counts_are_outputs_not_criteria：这是产物快照
+        # 非门槛，--check 只对黄金向量 exit 1）；前值 162/644/591/752 为 v3.51
+        # 旧冻结。v3.53 变化：RISK.account 增 halt_recover_stabilize_days /
+        # halt_recover_enabled 两键 → 759 元素，登记件 3de3377b…
+        "n_consts": 167, "n_keys_raw": 646, "n_keys_uniq": 593, "n_elements": 759,
     },
     "hand_typed_expected_forbidden": True,
     "surface_dump_file": "config_surface.elements.txt",

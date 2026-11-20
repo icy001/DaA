@@ -192,13 +192,18 @@ def calc_metrics(nav: pd.Series, trades: list = None,
 
 
 def _win_rate(trades: list) -> float:
-    # v3.52 回测验收修正（C-1 二次根因）：输入是 account.trades（_trade_record
-    # 无 status 字段、盈亏字段名 pnl）或 strategy.orders（status=filled、字段名
-    # realized_pnl）。以落盘 pnl 为准、realized_pnl 兼容别名；status 缺省按
-    # filled（account.trades 本身就是成交账本，带 status 的记录仍须 = filled）
-    pnls = [float(t.get("pnl", t.get("realized_pnl", 0)) or 0) for t in trades
-            if t.get("status", "filled") == "filled"
-            and ("pnl" in t or "realized_pnl" in t)]
+    # 胜率口径归一（v3.53 评审裁定）：胜率 = 已实现结果中盈利的比例，分母只算
+    # 平仓笔（action=="close"，即有已实现盈亏结果的近似交易对）。开仓笔没有
+    # 结果，不得进分母——首轮 16.60%（分母 488 全部成交）vs 明细 33.47%
+    # （分母 242 平仓笔）的分母错配即此教训，两个数不得并列同名「胜率」。
+    # 两本账（account.trades 与 place_order 返回）成交记录统一携带 action
+    # 字段；缺 action 的历史记录回退按「携带已实现盈亏字段」判定。
+    closed = [t for t in trades
+              if t.get("status", "filled") == "filled"
+              and (t.get("action") == "close"
+                   or (t.get("action") is None
+                       and ("pnl" in t or "realized_pnl" in t)))]
+    pnls = [float(t.get("pnl", t.get("realized_pnl", 0)) or 0) for t in closed]
     if not pnls:
         return 0.0
     return float(sum(1 for p in pnls if p > 0) / len(pnls))

@@ -315,7 +315,7 @@ def test_config_gates_declared():
     assert conf["max_consecutive_failures"] == 3
     assert conf["local_fallback_must_exist"] is True
     assert conf["source_health_file"] == "data_cache/source_health.json"
-    assert config.SPEC_VERSION == "v3.52"
+    assert config.SPEC_VERSION >= "v3.52"   # v3.53 起随版本滚动，只钉不倒退
     assert "13.0.19" in config.SPEC_VERSION_CHECK["must_contain_markers"]
     assert "13.0.20" in config.SPEC_VERSION_CHECK["must_contain_markers"]
     guard = gov("DATA_SOURCE_ADAPTER_GUARD")

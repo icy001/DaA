@@ -62,6 +62,48 @@ def test_win_rate_account_trades_shape():
     assert _win_rate(account_trades) == pytest.approx(2 / 3)
 
 
+def test_win_rate_denominator_is_closed_trades_only():
+    """v3.53 口径归一（计数口径冻结位）：胜率 = 已实现结果中盈利的比例，
+    分母 = 平仓笔（action=="close"，近似交易对——买卖笔数近似 1:1），
+    开仓笔没有结果、不得进分母。account.trades 的开仓笔带 pnl=0.0 字段，
+    旧实现按「有 pnl 字段」计分母曾把它们当「未盈利」计入（488 分母 vs
+    242 明细分母 → 16.60% vs 33.47% 的同名双口径）。"""
+    account_trades = [
+        # 3 笔平仓：2 盈 1 亏 → 胜率 2/3
+        {"direction": "sell", "action": "close", "pnl": 100.0},
+        {"direction": "sell", "action": "close", "pnl": -30.0},
+        {"direction": "cover", "action": "close", "pnl": 20.0},
+        # 5 笔开仓：pnl 恒 0.0（_trade_record 权威写端形态），不计分母
+        {"direction": "buy", "action": "open", "pnl": 0.0},
+        {"direction": "buy", "action": "open", "pnl": 0.0},
+        {"direction": "buy", "action": "open", "pnl": 0.0},
+        {"direction": "short", "action": "open", "pnl": 0.0},
+        {"direction": "buy", "action": "open", "pnl": 0.0},
+    ]
+    assert _win_rate(account_trades) == pytest.approx(2 / 3)
+
+
+def test_win_rate_metrics_matches_detail_basis():
+    """v3.53 口径归一：metrics.win_rate 与逐笔明细必须是同一个数——
+    同一份 account.trades 下，_win_rate == 明细口径（close 笔中 pnl>0 占比），
+    且与「全部成交作分母」的旧错口径不相等（防回归回 16.60%）。"""
+    trades = [
+        {"direction": "buy", "action": "open", "pnl": 0.0},
+        {"direction": "sell", "action": "close", "pnl": 100.0},
+        {"direction": "buy", "action": "open", "pnl": 0.0},
+        {"direction": "sell", "action": "close", "pnl": -30.0},
+        {"direction": "buy", "action": "open", "pnl": 0.0},
+        {"direction": "sell", "action": "close", "pnl": 20.0},
+    ]
+    got = _win_rate(trades)
+    # 明细口径：242 平仓笔中 81 正的同构算法 → close 笔分母
+    closes = [t for t in trades if t.get("action") == "close"]
+    detail = sum(1 for t in closes if t["pnl"] > 0) / len(closes)
+    assert got == pytest.approx(detail) == pytest.approx(2 / 3)
+    # 旧错口径（全成交作分母 2/6=1/3）必须不再出现
+    assert got != pytest.approx(2 / 6)
+
+
 # ==================== B-1 熔断自动恢复 ====================
 
 class _StubAccount:

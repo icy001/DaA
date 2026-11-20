@@ -1,1 +1,1 @@
-91a67b3752da8f505a86ab5f20c76eaafe6eaca36e15a07a0c211a0aa9929bf7  config.py（cs-v1：常量 167 + 白名单块 30 个递归键 591，共 757 元素；排序后 '\n'.join + 尾换行再 sha256，只比结构不比取值）
+3de3377bcb6d4a9a4ec69eee0c44dab3b4e308f1c4f2b585c27f62bc8d07ecba  config.py（cs-v1：常量 167 + 白名单块 30 个递归键 593，共 759 元素；排序后换行 join + 尾换行再 sha256，只比结构不比取值；v3.53 滚动：RISK.account 增 halt_recover_stabilize_days/halt_recover_enabled，前值 91a67b37…/757）
