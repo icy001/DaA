@@ -88,16 +88,18 @@ _NO_ORDER_MARKETS = {
     "trust": "信托产品走净值路径，不支持二级市场下单",
 }
 
-# v3.53 评审五轮·闸门7：场内衍生品市场标识（黑名单退役，仅供回测启动提示等
-# 展示逻辑使用——报单拦截已由下方 LIVE_ALLOWED_MARKETS 白名单统一接管）
+# v3.53 评审五轮·闸门7：场内衍生品市场标识（黑名单已退役，仅供回测启动提示等
+# 展示逻辑使用——报单拦截由「主体性质硬拦 + LIVE_ALLOWED_MARKETS 白名单」接管）
 DERIVATIVE_MARKETS = {"cn_future", "cn_option", "global_future"}
 
 # v3.53 评审六轮·闸门7 白名单化（fail-closed）：实盘允许交易的市场集合。
-# 语义：live 模式下 market ∈ 白名单才放行，【未显式列入的一律 raise】；
-# 新增市场（如期货开工后的 cn_future）必须显式加入并附预检回执，
-# 防止「新增衍生品市场忘记登记 → 实盘静默漏拦」的黑名单 fail-open。
-# 初始最小集 = 已具备实盘券商通道的 A 股现货族；扩市场 = 显式放行动作。
-LIVE_ALLOWED_MARKETS = {"cn_stock", "cn_etf"}
+# v3.53 评审七轮·语义修正：白名单只管「非衍生品市场」的实盘扩展；【衍生品实盘
+# 禁令由账户主体性质决定，不由本集合决定】——个人主体对衍生品市场永久硬拦，
+# 把衍生品市场错误加进白名单也绕不过（先查主体闸再查白名单闸）。
+# v3.54 / 13.0.25（评审七轮）：集合入治理面 config.LIVE_SAFETY["live_allowed_markets"]
+# （唯一参数源，模块常量仅为兼容引用派生）；扩市场 = 治理面显式加入 + 预检回执。
+LIVE_ALLOWED_MARKETS = {str(m) for m in config.LIVE_SAFETY.get("live_allowed_markets")
+                        or []} or {"cn_stock", "cn_etf"}
 
 
 class LiveMarketForbidden(RuntimeError):
@@ -109,7 +111,7 @@ class LiveMarketForbidden(RuntimeError):
 
 
 class DerivativeMarketLiveForbidden(LiveMarketForbidden):
-    """实盘模式下衍生品市场报单——白名单拦截的衍生品特化异常（保持既有引用兼容）。"""
+    """个人主体实盘衍生品报单——主体性质永久硬拦（白名单不可绕过）。"""
 
 
 # 手续费计价货币（calc_commission 的返回值单位）
@@ -172,10 +174,16 @@ class TradingAccount:
 
     def __init__(self, initial_capital: float = None, base_currency: str = "CNY",
                  fetcher=None, run_mode: str = None, logger: logging.Logger = None,
-                 fx_rates: Dict[str, float] = None):
+                 fx_rates: Dict[str, float] = None,
+                 account_subject: str = "personal"):
         self.initial_capital = float(config.INITIAL_CASH if initial_capital is None
                                       else initial_capital)
         self.base_currency = str(base_currency or "CNY").upper()
+        # 账户主体性质（v3.53 评审七轮·闸门7）：personal（默认）/institution。
+        # 个人主体对衍生品市场【永久硬拦】——即使衍生品市场被错误加入
+        # LIVE_ALLOWED_MARKETS 白名单也绕不过（先查主体闸再查白名单闸）。
+        # 默认 personal = fail-closed：institution 必须显式声明。
+        self.account_subject = str(account_subject or "personal").lower()
         self.cash = self.initial_capital
         self.frozen_cash = 0.0
         self.margin_used = 0.0
@@ -449,18 +457,22 @@ class TradingAccount:
             return self._reject(symbol, direction, "缺少有效价格（下单必须给出 price）")
 
         market = self._market_of(symbol, market_type)
-        # 闸门7 白名单（v3.53 评审六轮）：live 模式下 market 必须显式列入
-        # LIVE_ALLOWED_MARKETS 才放行，未列入（含衍生品、识别不出）一律直接
-        # raise——fail-closed，防「新增市场忘记登记 → 实盘静默漏拦」
-        if self.run_mode == "live" and market not in LIVE_ALLOWED_MARKETS:
-            if market in DERIVATIVE_MARKETS:
+        # 闸门7（v3.53 评审七轮）：实盘两道闸，【主体闸优先于白名单闸】——
+        # ① 主体闸：个人主体对衍生品市场永久硬拦，即使衍生品市场被错误加进
+        #    LIVE_ALLOWED_MARKETS 也绕不过（实盘放行与回测/研究扩围解耦）；
+        # ② 白名单闸：非衍生品市场必须显式列入 LIVE_ALLOWED_MARKETS。
+        # 两者均直接 raise（非打印警告、非拒单返回）。
+        if self.run_mode == "live":
+            if (market in DERIVATIVE_MARKETS
+                    and self.account_subject == "personal"):
                 raise DerivativeMarketLiveForbidden(
-                    f"[live] {market} 属衍生品市场且未列入 live 白名单，个人实盘"
-                    "禁止报单（闸门7硬拦，直接 raise 非警告）；开工须显式放行并附预检回执")
-            raise LiveMarketForbidden(
-                f"[live] 市场 {market!r} 未列入 LIVE_ALLOWED_MARKETS 白名单"
-                f"（当前={sorted(LIVE_ALLOWED_MARKETS)}），直接 raise 硬拦；"
-                "扩市场必须显式放行并附预检回执")
+                    f"[live] 账户主体=个人，衍生品市场 {market} 永久禁止实盘报单"
+                    "（主体性质硬拦，白名单不可绕过）；期货/期权仅限回测/研究/仿真")
+            if market not in LIVE_ALLOWED_MARKETS:
+                raise LiveMarketForbidden(
+                    f"[live] 市场 {market!r} 未列入 LIVE_ALLOWED_MARKETS 白名单"
+                    f"（当前={sorted(LIVE_ALLOWED_MARKETS)}），直接 raise 硬拦；"
+                    "扩市场必须显式放行并附预检回执")
         if market in _NO_ORDER_MARKETS:
             return self._reject(symbol, direction, _NO_ORDER_MARKETS[market], market=market)
         if market == "cn_index":

@@ -59,7 +59,8 @@ class LiveTrader:
                  kill_switch: KillSwitch = None, reconciler: Reconciler = None,
                  freshness_fn: Callable = None,
                  first_order_confirmed: bool = False,
-                 audit=None, notifier=None) -> None:
+                 audit=None, notifier=None,
+                 account_subject: str = "personal") -> None:
         self.simulated = bool(simulated)
         self.mode = mode_guard.resolve_mode(
             mode, broker_connected=bool(getattr(broker, "connected", True)),
@@ -68,7 +69,12 @@ class LiveTrader:
         self.strategy_id = str(strategy_id)
         self.logger = logger or setup_logger("live", config.LOG_DIR / "live_trader.log")
         self.account = account or TradingAccount(run_mode=self.mode, fetcher=fetcher,
-                                                 logger=self.logger)
+                                                 logger=self.logger,
+                                                 account_subject=account_subject)
+        # 账户主体性质（v3.53 评审七轮·闸门7）：personal（默认）/institution——
+        # 个人主体衍生品实盘永久硬拦（主体闸优先于白名单闸，白名单不可绕过）
+        self.account_subject = str(getattr(self.account, "account_subject",
+                                           account_subject) or "personal").lower()
         self.fetcher = fetcher
         # B-1：实盘熔断状态落盘（跨进程：CLI risk-reset 删标志文件 → 换日同步解除）
         self.risk = LiveRiskManager(self.account, params=risk_params, logger=self.logger,
@@ -204,24 +210,25 @@ class LiveTrader:
         if direction not in ("buy", "sell", "short", "cover"):
             raise OrderPortError(f"非法方向 {direction!r}", stage="direction")
         self.kill_switch.assert_can_trade()
-        # 闸门7 白名单（v3.53 评审六轮）：实盘只允许 LIVE_ALLOWED_MARKETS 内的市场，
-        # 未显式列入的一律直接 raise（fail-closed 黑名单退役——防「新增衍生品市场
-        # 忘记登记 → 实盘静默漏拦」）。market 缺失按 symbol 兜底识别，【识别不出
-        # 必须默认拒绝】，不得当作普通市场放行。
-        # DerivativeMarketLiveForbidden / LiveMarketForbidden 均不继承 LiveSafetyError，
-        # submit_order 的拒单捕获无法吞掉，必须穿透到调用方进程级停机。
+        # 闸门7（v3.53 评审七轮）：实盘两道闸，【主体闸优先于白名单闸】——
+        # ① 主体闸：个人主体对衍生品市场永久硬拦，即使衍生品市场被错误加进
+        #    LIVE_ALLOWED_MARKETS 也绕不过（实盘放行与回测/研究扩围解耦）；
+        # ② 白名单闸：非衍生品市场必须显式列入白名单；market 缺失按 symbol 兜底
+        #    识别，【识别不出必须默认拒绝】，不得当作普通市场放行。
+        # 两异常均不继承 LiveSafetyError，submit_order 的拒单捕获无法吞掉，
+        # 必须穿透到调用方进程级停机（直接 raise 非打印警告）。
         if self.mode == "live" and not self.simulated:
             try:
                 dmarket = str(market or "").lower() or \
                     config.detect_market_type(symbol)
             except Exception:  # noqa: BLE001 - 识别不出=未知市场：默认拒绝（fail-closed）
                 dmarket = ""
+            if (dmarket in DERIVATIVE_MARKETS
+                    and self.account_subject == "personal"):
+                raise DerivativeMarketLiveForbidden(
+                    f"[live] 账户主体=个人，{symbol}（{dmarket}）衍生品市场永久禁止"
+                    "实盘报单（主体性质硬拦，白名单不可绕过）；期货/期权仅限回测/研究/仿真")
             if dmarket not in LIVE_ALLOWED_MARKETS:
-                if dmarket in DERIVATIVE_MARKETS:
-                    raise DerivativeMarketLiveForbidden(
-                        f"[live] {symbol}（{dmarket}）属衍生品市场且未列入 live 白名单，"
-                        "个人实盘禁止报单（闸门7硬拦，直接 raise 非警告）；"
-                        "开工须显式放行并附预检回执")
                 raise LiveMarketForbidden(
                     f"[live] {symbol} 市场 {dmarket!r} 未列入 LIVE_ALLOWED_MARKETS "
                     f"白名单（当前={sorted(LIVE_ALLOWED_MARKETS)}），直接 raise 硬拦；"

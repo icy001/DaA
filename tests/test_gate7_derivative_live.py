@@ -32,7 +32,7 @@ def _order_kwargs(**over):
 def test_live_mode_derivative_order_raises():
     """实盘模式期货报单：直接 raise（非警告、非拒单 dict）。"""
     acc = TradingAccount(1_000_000, run_mode="live")
-    with pytest.raises(DerivativeMarketLiveForbidden, match="闸门7"):
+    with pytest.raises(DerivativeMarketLiveForbidden, match="主体性质硬拦"):
         acc.place_order(**_order_kwargs())
 
 
@@ -133,6 +133,53 @@ def test_live_trader_precheck_unknown_symbol_defaults_to_reject():
         lt._precheck("buy", "cash", None, "XX9999", market=None)
 
 
+# ==================== 评审七轮·主体性质硬拦（白名单不可绕过） ====================
+
+def test_personal_subject_derivative_blocked_even_if_whitelisted(monkeypatch):
+    """核心结构测试：即使 cn_future 被错误加进 LIVE_ALLOWED_MARKETS 白名单，
+    个人主体的衍生品实盘报单依然被主体闸拦截——白名单不可绕过主体硬拦。"""
+    import core.account as acc_mod
+    monkeypatch.setattr(acc_mod, "LIVE_ALLOWED_MARKETS",
+                        set(acc_mod.LIVE_ALLOWED_MARKETS) | {"cn_future"})
+    acc = TradingAccount(1_000_000, run_mode="live", account_subject="personal")
+    with pytest.raises(DerivativeMarketLiveForbidden, match="主体"):
+        acc.place_order(**_order_kwargs())
+
+
+def test_institution_subject_derivative_still_needs_whitelist(monkeypatch):
+    """机构主体过主体闸，但仍受白名单闸约束（cn_future 未列入 → 仍拦，
+    只是异常语义变为「白名单未放行」而非「主体禁止」）。"""
+    import core.account as acc_mod
+    from core.account import LiveMarketForbidden
+    monkeypatch.setattr(acc_mod, "LIVE_ALLOWED_MARKETS",
+                        set(acc_mod.LIVE_ALLOWED_MARKETS))   # 未加 cn_future
+    acc = TradingAccount(1_000_000, run_mode="live", account_subject="institution")
+    with pytest.raises(LiveMarketForbidden):
+        acc.place_order(**_order_kwargs())
+
+
+def test_account_subject_defaults_to_personal():
+    """主体性质默认 personal（fail-closed）：institution 必须显式声明。"""
+    assert TradingAccount(1_000_000).account_subject == "personal"
+    assert TradingAccount(1_000_000, account_subject="INSTITUTION"
+                          ).account_subject == "institution"
+
+
+def test_live_trader_personal_derivative_raises_through(monkeypatch):
+    """实盘收口：个人主体 + cn_future（即使白名单被篡改）→ raise 穿透。"""
+    import core.account as acc_mod
+    from live.live_trader import LiveTrader
+    monkeypatch.setattr(acc_mod, "LIVE_ALLOWED_MARKETS",
+                        set(acc_mod.LIVE_ALLOWED_MARKETS) | {"cn_future"})
+    lt = LiveTrader.__new__(LiveTrader)
+    lt.mode = "live"
+    lt.simulated = False
+    lt.account_subject = "personal"
+    lt.kill_switch = SimpleNamespace(assert_can_trade=lambda: None)
+    with pytest.raises(DerivativeMarketLiveForbidden, match="主体"):
+        lt._precheck("buy", "cash", None, "RB2512", market="cn_future")
+
+
 # ==================== live_trader 层（实盘报单唯一收口） ====================
 
 def _bare_trader():
@@ -140,6 +187,7 @@ def _bare_trader():
     lt = LiveTrader.__new__(LiveTrader)
     lt.mode = "live"
     lt.simulated = False
+    lt.account_subject = "personal"   # 评审七轮：主体性质（默认 personal）
     lt.kill_switch = SimpleNamespace(assert_can_trade=lambda: None)
     return lt
 

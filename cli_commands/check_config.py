@@ -34,6 +34,24 @@ def _print_surface() -> None:
               f"两机对齐用 config_surface.elements.txt 做 comm -3）{note}")
     except Exception as exc:  # noqa: BLE001 - 打印失败不得阻断诊断命令
         print(f"[config_surface] 打印失败：{exc}")
+    _print_value_fingerprint()
+
+
+def _print_value_fingerprint() -> None:
+    """v3.54 / 13.0.25 ③：口径键值指纹（结构哈希守键名、本指纹守取值，互补）。
+
+    落盘 config_values.sha256 供两机对拍；值级变更必须登记验收单
+    「基准口径登记表」（谁/何时/为何/新旧超额对比）。打印失败不得阻断。
+    """
+    try:
+        from core import spec_check
+        fp = spec_check.compute_value_fingerprint()
+        path = spec_check.write_value_fingerprint()
+        print(f"[config_values/values-v1] {fp['sha256']}  "
+              f"（口径键 {len(fp['keys'])} 个值级指纹，落盘 {path.name}；"
+              "值级变更必须登记验收单基准口径登记表并纳入两机对拍）")
+    except Exception as exc:  # noqa: BLE001 - 打印失败不得阻断诊断命令
+        print(f"[config_values] 打印失败：{exc}")
 
 
 def handler(args) -> int:

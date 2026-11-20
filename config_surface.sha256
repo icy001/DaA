@@ -1,1 +1,1 @@
-3de3377bcb6d4a9a4ec69eee0c44dab3b4e308f1c4f2b585c27f62bc8d07ecba  config.py（cs-v1：常量 167 + 白名单块 30 个递归键 593，共 759 元素；排序后换行 join + 尾换行再 sha256，只比结构不比取值；v3.53 滚动：RISK.account 增 halt_recover_stabilize_days/halt_recover_enabled，前值 91a67b37…/757）
+3e43c06db59f9f65026045ee4abe67401e969f045df396085d606ee29e6be1d4  config.py（cs-v1：常量 167 + 白名单块 30 个递归键 594，共 760 元素；排序后换行 join + 尾换行再 sha256，只比结构不比取值；v3.54 滚动：LIVE_SAFETY 增 live_allowed_markets（13.0.25 live 市场白名单入治理面），前值 3de3377b…/759）

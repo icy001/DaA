@@ -1970,6 +1970,113 @@ class DataFetcher:
             self._save_dominant(variety, dominant)
         return df
 
+    # ---- v3.53 评审七轮：期货自建主力连续双序列（换月规则可控可对拍） ----
+
+    def build_dominant_series(self, contracts: List[str], start: str, end: str,
+                              variety: str = None) -> pd.DataFrame:
+        """自建主力连续【双序列】：不消费数据源黑箱拼接（换月规则不可控不可对拍）。
+
+        换月规则（声明口径）：合约按传入顺序视为到期序；某日「后一合约成交量
+        首次超过当前合约」即换月日（当日量数据收盘后可知 → 无未来信息），
+        当日起主力切换为后一合约。
+        输出（与股票双价体系对齐的期货版）：
+          - 主列 OHLC = 换月【回溯调整】连续价（信号/收益/回撤/熔断消费，
+            消除换月缺口假信号）；
+          - raw_open/high/low/close = 当日实际主力合约价（保证金/结算/报单消费）；
+          - settle 列 = 当日实际主力结算价（涨跌停/强平/逐日盯市口径）；
+          - contract 列 = 当日主力合约代码；roll 列 = 是否换月日（True/False）；
+          - adj_factor 列 = 累计换月调整因子（adj = raw × adj_factor）。
+        未平滑口径下换月缺口 = 新旧合约月差（虚构盈亏源），调整序列已消除；
+        实际可成交价永远只在 raw 列。
+        """
+        variety = variety or re.sub(r"\d", "", str(contracts[-1])).upper()
+        frames = {}
+        for c in contracts:
+            raw = self._request(ak.futures_zh_daily_sina, symbol=str(c).upper(),
+                                _source="sina_futures")
+            df = raw.rename(columns={"date": "date"})
+            df["date"] = pd.to_datetime(df["date"])
+            frames[str(c).upper()] = df.set_index("date").sort_index().astype(float)
+        merged = pd.concat(
+            {c: f[["open", "high", "low", "close", "volume", "settle"]]
+             for c, f in frames.items()}, axis=1)
+        rows, current, cum_factor = [], None, 1.0
+        all_days = sorted({d for c in frames for d in frames[c].index})
+        prev_close_of = {c: None for c in frames}
+        for day in all_days:
+            if current is None:
+                current = str(contracts[0]).upper()
+            # 【先】更新全部合约当日收盘（新合约切换前的前收必须可得，
+            # 否则换月调整因子恒 1、缺口照旧——首轮实测踩坑点）
+            self._update_prev(prev_close_of, merged, day)
+            if current is not None:
+                idx = [str(c).upper() for c in contracts].index(current)
+                nxt = str(contracts[idx + 1]).upper() if idx + 1 < len(contracts) else None
+                if (nxt and day in merged.index
+                        and not pd.isna(merged.loc[day, (nxt, "volume")])
+                        and not pd.isna(merged.loc[day, (current, "volume")])
+                        and float(merged.loc[day, (nxt, "volume")])
+                        > float(merged.loc[day, (current, "volume")])):
+                    old = current
+                    old_prev = prev_close_of.get(old)
+                    new_prev = prev_close_of.get(nxt)
+                    if old_prev and new_prev and new_prev > 0:
+                        # 后复权式回溯调整：切换日按「旧主力前收 / 新主力前收」放大
+                        # 历史因子，使调整序列跨换月连续（缺口只留在 raw 列）
+                        cum_factor *= float(old_prev) / float(new_prev)
+                    current = nxt
+                    # 旧合约当日实际收盘（换月平旧腿的可成交价，评审七轮④：
+                    # 换月日必须平旧开新两笔成交，月差与手续费如实入账）
+                    old_close = None
+                    if day in merged.index and not pd.isna(merged.loc[day, (old, "close")]):
+                        old_close = float(merged.loc[day, (old, "close")])
+                    rows.append(self._dominant_row(merged, frames, current, day,
+                                                   cum_factor, roll=True,
+                                                   roll_exit_price=old_close,
+                                                   roll_prev_contract=old))
+                    continue
+            rows.append(self._dominant_row(merged, frames, current, day,
+                                           cum_factor, roll=False))
+        out = pd.DataFrame([r for r in rows if r is not None]).set_index("date")
+        out = out.loc[(out.index >= pd.Timestamp(start))
+                      & (out.index <= pd.Timestamp(end))]
+        out.attrs.update({
+            "market": "cn_future", "adjust": "none", "source": "self_built_dominant",
+            "roll_rule": "volume_cross_same_day",
+            "contracts": [str(c).upper() for c in contracts],
+            "volume_unit": "手", "amount_missing": True,
+            "dual_price": True,
+            "basis_note": "主列=换月回溯调整连续价（信号）；raw_*=实际合约价（保证金/结算/报单）；"
+                          "settle=结算价（涨跌停/强平/盯市口径）",
+        })
+        return out
+
+    @staticmethod
+    def _dominant_row(merged, frames, current, day, cum_factor, roll,
+                      roll_exit_price=None, roll_prev_contract=None):
+        if day not in merged.index or pd.isna(merged.loc[day, (current, "close")]):
+            return None
+        row = merged.loc[day, current]
+        raw_o, raw_h = float(row["open"]), float(row["high"])
+        raw_l, raw_c = float(row["low"]), float(row["close"])
+        return {"date": day, "open": raw_o * cum_factor, "high": raw_h * cum_factor,
+                "low": raw_l * cum_factor, "close": raw_c * cum_factor,
+                "volume": float(row["volume"]), "settle": float(row["settle"]),
+                "raw_open": raw_o, "raw_high": raw_h, "raw_low": raw_l,
+                "raw_close": raw_c, "adj_factor": cum_factor,
+                "contract": current, "roll": roll,
+                # 换月平旧腿：旧合约当日实际收盘价 + 旧合约代码（引擎换月平开用）
+                "roll_exit_price": roll_exit_price,
+                "roll_prev_contract": roll_prev_contract}
+
+    @staticmethod
+    def _update_prev(prev_close_of, merged, day):
+        """更新全部合约当日收盘（切换前新合约的前收是换月因子的必要输入）。"""
+        for c in prev_close_of:
+            if day in merged.index and c in merged.columns.get_level_values(0) \
+                    and not pd.isna(merged.loc[day, (c, "close")]):
+                prev_close_of[c] = float(merged.loc[day, (c, "close")])
+
     def _fetch_intl_futures_daily(self, symbol, start, end, adjust):
         # ⚠️ 外盘期货同样只有 volume（单位=手），无成交额；禁止用 close×volume 估算成交额
         df = self._standardize(self._request(ak.futures_foreign_hist,

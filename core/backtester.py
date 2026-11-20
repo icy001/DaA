@@ -279,6 +279,8 @@ class Backtester:
         self.strategy: Optional[BaseStrategy] = None
         self.account: Optional[TradingAccount] = None
         self.margin_calls = 0
+        # 期货换月平开成交对数（v3.53 评审七轮④：换月日必须平旧开新）
+        self.roll_count = 0
         self.state = {"date": None}
         self._prev_close: Dict[str, float] = {}
         # 双价体系：各标的「上一根 bar 的 adj_factor」——除权日涨跌停参考价
@@ -448,7 +450,12 @@ class Backtester:
                 if isinstance(row, pd.DataFrame):
                     row = row.iloc[-1]
                 rows[symbol] = row.to_dict()
-                px = row.get("close")
+                # 期货结算价口径（v3.53 评审七轮）：涨跌停/保证金/强平以【昨结算价】
+                # 为准——bar 带 settle 列时盯市价优先取结算价（收盘价仅作回退），
+                # 结算价口径错会让强平阈值整体偏移（9% 保证金 ≈ 11 倍杠杆）
+                px = row.get("settle")
+                if px is None or not (np.isfinite(float(px)) and float(px) > 0):
+                    px = row.get("close")
                 if px is not None and np.isfinite(float(px)) and float(px) > 0:
                     prices[symbol] = float(px)
             if not rows:
@@ -477,6 +484,8 @@ class Backtester:
             self._fill_pending_orders(date)
             # 1-4：策略出信号 → 成交模型撮合（same_* 时同根，next_* 时入队）
             self._dispatch(date, bars)
+            # 4.5：期货换月日平旧开新（评审七轮④：持仓跨换月不动 = 每轮换月 P&L 全是假的）
+            self._handle_contract_rolls(date, bars)
             # 6：保证金检查/强平
             closed = self.account.check_margin_call(prices)
             self.margin_calls += len(closed)
@@ -510,23 +519,91 @@ class Backtester:
     # ---------- 撮合时点（E1） ----------
 
     def _build_prev_close(self, bars: Dict[str, dict]) -> Dict[str, float]:
-        """下一根 bar 的涨跌停前收（v3.53 评审四轮·除权参考价）。
+        """下一根 bar 的涨跌停/风控前收（v3.53 评审四/六/七轮）。
 
-        - 双价帧（带 raw_close）：除权参考价 = raw 昨收 × (昨日因子/当日因子)，
+        - 期货帧（带 settle）：前收 = 昨【结算价】（交易所涨跌停/强平口径，
+          评审七轮：昨收口径会让强平阈值整体偏移，9% 保证金 ≈ 11 倍杠杆）；
+        - 双价帧（带 raw_close，股票）：除权参考价 = raw 昨收 × (昨日因子/当日因子)，
           与交易所「昨收减现金红利/配股调整」公式在因子表精度内等价；
           非除权日比值 = 1 → 行为与昨收完全一致；
-        - 日线帧（无 raw 列）：沿用主列 close（既有行为不变）。
+        - 日线帧（无上述列）：沿用主列 close（既有行为不变）。
         """
         out = {}
         for s, b in bars.items():
-            raw_c = b.get("raw_close")
-            if raw_c:
+            if b.get("settle") is not None:
+                out[s] = float(b.get("settle"))          # 期货：昨结算价口径
+            elif b.get("raw_close"):
                 f_today = float(b.get("adj_factor") or 1.0)
                 f_prev = self._prev_adj_factor.get(s, f_today)
-                out[s] = float(raw_c) * (f_prev / f_today)
+                out[s] = float(b.get("raw_close")) * (f_prev / f_today)
             else:
                 out[s] = float(b.get("close") or 0)
         return out
+
+    def _handle_contract_rolls(self, date, bars: Dict[str, dict]) -> None:
+        """期货换月日平旧开新（v3.53 评审七轮④）。
+
+        持仓跨换月不动 = 成本停留在旧合约绝对价位、盯市切到新合约绝对价位，
+        月差会被记成虚构盈亏——评审裁定「每轮换月的 P&L 都是假的」。
+        时点：量交叉当日收盘确认 → 双腿均按当日收盘价【机械】成交（收盘后
+        无再决策，与序列「当日量交叉切换」口径一致，无未来函数）；
+          - 平旧 @ 旧合约当日实际收盘（bar["roll_exit_price"]，真实旧合约盈亏，
+            手续费按平仓费率如实入账）；
+          - 开新 @ 新合约当日实际收盘（bar["raw_close"]，成本切换到新合约
+            raw 空间，与后续盯市/结算价口径对齐），保证金按新合约价格重估。
+        换月是机制性调仓而非策略信号：直连 _execute（与强平同级，不受
+        涨跌停/量限约束），回测口径假设换月双腿必然成交；实盘换月由
+        live_trader 报单链路处理，不走此路径。
+        """
+        day = pd.Timestamp(date).date()
+        for s, b in bars.items():
+            if not b.get("roll"):
+                continue
+            entry_px = b.get("raw_close")
+            exit_px = b.get("roll_exit_price")
+            if not entry_px or entry_px <= 0 or not exit_px or exit_px <= 0:
+                self.logger.warning(
+                    "换月日 %s %s 缺双腿价格（raw_close=%s roll_exit_price=%s），"
+                    "持仓跨月未滚动——月差将计入盯市盈亏", date, s, entry_px, exit_px)
+                continue
+            for book, side, close_dir, open_dir in (
+                    (self.account.positions, "long", "sell", "buy"),
+                    (self.account.short_positions, "short", "cover", "short")):
+                pos = book.get(s)
+                if pos is None or pos.volume <= 0:
+                    continue
+                market = pos.market or config.detect_market_type(s)
+                rule = self.account._rule_of(market, s)
+                vol = pos.volume
+                res_close = self.account._execute(
+                    symbol=s, market=market, rule=rule, kind=pos.kind,
+                    action="close", side=side, direction=close_dir, volume=vol,
+                    price=float(exit_px), day=day, order_time=date, is_etf=None,
+                    underlying_price=None, hold_days=None, option_type=None,
+                    strike=None, expiry=None)
+                if res_close.get("status") != "filled":
+                    self.logger.warning("换月平旧失败 %s：%s", s, res_close.get("reason"))
+                    continue
+                res_open = self.account._execute(
+                    symbol=s, market=market, rule=rule, kind=pos.kind,
+                    action="open", side=side, direction=open_dir, volume=vol,
+                    price=float(entry_px), day=day, order_time=date, is_etf=None,
+                    underlying_price=None, hold_days=None, option_type=None,
+                    strike=None, expiry=None)
+                if res_open.get("status") != "filled":
+                    # 平旧已成交、开新被拒：敞口空档如实暴露（资金不足等），
+                    # 禁止静默当作滚动成功
+                    self.logger.warning("换月开新失败 %s（已平旧未开新，敞口空档）：%s",
+                                        s, res_open.get("reason"))
+                    continue
+                self.roll_count += 1
+                self.logger.info(
+                    "换月平开 %s %s：平旧 %d 手 @ %.2f（前合约 %s）→ 开新 %d 手 @ %.2f"
+                    "（现合约 %s），手续费 %.2f+%.2f",
+                    date, s, vol, float(exit_px), b.get("roll_prev_contract"),
+                    vol, float(entry_px), b.get("contract"),
+                    float(res_close.get("commission") or 0),
+                    float(res_open.get("commission") or 0))
 
     def _queue_order(self, kwargs: dict) -> bool:
         """账户把订单交给引擎排队：记下决策 bar 下标，下一根 bar 以 fill_now 撮合。"""

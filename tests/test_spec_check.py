@@ -671,8 +671,9 @@ def test_ledger_covers_all_script_globs():
     out = spec_check.verify_acceptance_scripts()
     assert out["ok"] is True, out["reason"]
     globbed, registered = int(out["globbed"]), int(out["registered"])
-    # 49 = 48（v3.53 评审四轮冻结）+ 1（tests/test_gate7_derivative_live.py：衍生品实盘硬拦专项套件）
-    assert globbed == 49, f"glob 命中 {globbed} 个验收脚本（9 根 + 39 tests + 1 checklist）"
+    # 50 = 49（v3.53 评审六轮冻结）+ 1（v3.54 评审七轮④ tests/test_future_roll.py：
+    # 期货换月平旧开新专项套件，账本 add 条目留痕）
+    assert globbed == 50, f"glob 命中 {globbed} 个验收脚本（9 根 + 40 tests + 1 checklist）"
     assert out["coverage"] == f"{globbed}/{globbed}"
     assert registered >= globbed
 

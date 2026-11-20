@@ -18,6 +18,60 @@ import config
 _VERSION_RE = re.compile(r"^v(\d+)\.(\d+)")
 _CONST_RE = re.compile(r"[A-Z][A-Z0-9_]*")
 
+# v3.54 / 13.0.25 ③：口径键值指纹——cs-v1 结构哈希 ignore_values=True 只守键名
+# 不守值，基准/费率/保证金率等「口径键」的值级变更（如 000300→H00300 令超额摆动
+# 17.29pp）在结构哈希下毫无告警。本指纹对口径键的【取值】做稳定序列化哈希，
+# 与结构哈希互补：两机对拍必含 config_values.sha256；值级变更必须登记验收单
+# 「基准口径登记表」（谁/何时/为何/新旧超额对比）。
+VALUE_FINGERPRINT_KEYS = [
+    "BENCHMARK",              # 基准口径（H00300 全收益 ↔ 策略税前含息，绑定声明见验收单）
+    "DEFAULT_ADJUST",         # 全局默认复权口径
+    "INITIAL_CASH",           # 绩效分母
+    "EXECUTION_MODEL",        # 滑点/撮合基准/量限（值级变化直接影响成交模拟）
+    "RISK",                   # 熔断阈值/单票上限/费率相关风控参数
+    "CN_FUTURES_VARIETY",     # 期货合约规格（乘数/保证金率/手续费——值级口径）
+    "LIVE_SAFETY",            # live_allowed_markets 白名单等实盘安全参数
+]
+
+
+def _stable(obj) -> str:
+    """口径键值的稳定序列化（dict/set 排序、容器递归；标量取 type:值 兜底）。"""
+    if isinstance(obj, dict):
+        return "{" + ",".join(f"{k}:{_stable(v)}" for k, v in sorted(obj.items())) + "}"
+    if isinstance(obj, (set, frozenset)):
+        return "[" + ",".join(sorted(_stable(v) for v in obj)) + "]"
+    if isinstance(obj, (list, tuple)):
+        return "(" + ",".join(_stable(v) for v in obj) + ")"
+    return f"{type(obj).__name__}:{obj}"
+
+
+def compute_value_fingerprint() -> Dict[str, object]:
+    """口径键值指纹（v3.54 / 13.0.25 ③）：返回 {per_key, sha256, keys}。
+
+    结构哈希（cs-v1）守键名、本指纹守取值——两件互补，缺一不可。
+    """
+    import hashlib as _hl
+    per_key, payload = {}, []
+    for key in VALUE_FINGERPRINT_KEYS:
+        value = getattr(config, key, None)
+        h = _hl.sha256(_stable(value).encode("utf-8")).hexdigest()
+        per_key[key] = h
+        payload.append(f"{key}={h}")
+    sha = _hl.sha256("|".join(payload).encode("utf-8")).hexdigest()
+    return {"keys": list(VALUE_FINGERPRINT_KEYS), "per_key": per_key,
+            "sha256": sha}
+
+
+def write_value_fingerprint(root: Path = None) -> Path:
+    """落盘 config_values.sha256（首行总指纹，随后逐键指纹便于定位变更键）。"""
+    base = Path(root or config.BASE_DIR)
+    fp = compute_value_fingerprint()
+    lines = [f"{fp['sha256']}  config_values (algo=values-v1)"]
+    lines += [f"{h}  {k}" for k, h in fp["per_key"].items()]
+    path = base / "config_values.sha256"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
 
 def _conf() -> dict:
     return dict(config.SPEC_VERSION_CHECK or {})
