@@ -1766,6 +1766,13 @@ class DataFetcher:
         attrs 显式标注 volume_unit / source_volume_unit，跨源切换打 WARNING。
         指数没有复权概念（adjust 一律视为 none）；禁止复用个股/期货接口。
         """
+        # 中证官网专用指数（全收益 Hxxxxx / 净收益 Nxxxxx，v3.53 评审四轮·基准对齐）：
+        # 东财/新浪/BaoStock 均不提供全收益指数，唯一源是中证指数官网（权威发布方），
+        # 不走通用优先级链（其余源对 H00300 直接返回空，实测 2026-11-20）
+        text = str(symbol).strip().upper()
+        if len(text) == 6 and text[0] in ("H", "N") and text[1:].isdigit():
+            return self._fetch_csindex_ex_return(text, start, end)
+
         prefix, digits = self._index_parts(symbol)
         errors = []
         for src in config.CN_INDEX_DAILY_PRIORITY:
@@ -1788,6 +1795,53 @@ class DataFetcher:
         "baostock": "BaoStock（volume=股、含成交额）",
         "tencent": "腾讯（未接入：唯一数量列实测为成交量(手)）",
     }
+
+    def _fetch_csindex_ex_return(self, code: str, start: str, end: str) -> pd.DataFrame:
+        """中证官网全收益（H）/净收益（N）指数日线（v3.53 评审四轮·基准对齐）。
+
+        全收益指数 = 价格指数 + 样本股分红再投资；净收益指数再扣 10% 红利税。
+        基准含息对齐专用：策略按前复权（含息再投资）记账时，若仍用价格指数
+        （不含股息）作基准，超额收益被系统性高估。
+        """
+        kind = {"H": "total_return", "N": "net_return"}[code[0]]
+        # 接口只认紧凑日期（带连字符会少返回 ~200 行，实测 2026-11-20）
+        s_compact = pd.Timestamp(start).strftime("%Y%m%d")
+        e_compact = pd.Timestamp(end).strftime("%Y%m%d")
+        raw = self._request(ak.stock_zh_index_hist_csindex, symbol=code,
+                            start_date=s_compact, end_date=e_compact, _source="csindex")
+        if raw is None or raw.empty:
+            raise RuntimeError(f"[cn_index] 中证官网 {code} 返回空表")
+        # 全收益/净收益指数仅保证收盘价（中证官网对早期区间不提供开盘/最高/最低，
+        # 实测开盘列 1300+ 行 NaN）：OHLC 缺失用同行收盘价占位，避免质量检查把
+        # 完整 close 序列误丢（基准曲线只消费 close）；attrs 显式标注占位事实
+        for col in ("开盘", "最高", "最低"):
+            if col in raw.columns:
+                raw[col] = raw[col].fillna(raw["收盘"])
+        ohlc_filled = True
+        # 部分返回防护（2026-11-20 实测该接口偶发只返回 ~345 行且被静默缓存）：
+        # 交易日数按工作日近似，返回行数不足期望的 75% 视为接口部分返回，直接报错
+        # 禁止落缓存（fail-closed，防止残缺指数基准被当作完整数据用于超额计算）
+        s_d = str(pd.Timestamp(start).date())
+        e_d = str(pd.Timestamp(end).date())
+        expected = max(int(np.busday_count(s_d, e_d)) + 1, 1)
+        if len(raw) < expected * 0.75:
+            raise RuntimeError(
+                f"[cn_index] 中证官网 {code} 返回 {len(raw)} 行，显著少于期望约 {expected} 个"
+                f"交易日（疑似接口部分返回），拒绝提供残缺指数数据；请重试")
+        df = self._standardize(raw, interface="stock_zh_index_hist_csindex",
+                               market="cn_index", symbol=code)
+        df = df.loc[start:end]
+        df.attrs.update({
+            "adjust": "none", "market": "cn_index", "source": "csindex",
+            "index_kind": kind,
+            "amount_missing": True,      # 中证官网接口无实际成交额语义（字段为指数成交额汇总）
+            "ohlc_filled_with_close": ohlc_filled,   # 全收益指数无盘价语义，OHLC 用 close 占位
+            "basis_note": ("全收益指数（含样本股分红再投资）" if kind == "total_return"
+                           else "净收益指数（全收益再扣 10% 红利税）"),
+        })
+        if df.empty:
+            raise RuntimeError(f"[cn_index] 中证官网 {code} 区间 {start}~{end} 无数据")
+        return df
 
     def _cn_index_daily_one(self, src, prefix, digits, start, end, symbol) -> pd.DataFrame:
         """单个指数日线源，返回已标准化 + 单位归一 + attrs 标注的 DataFrame。"""

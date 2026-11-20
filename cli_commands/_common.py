@@ -84,6 +84,10 @@ def print_metrics(metrics: dict) -> None:
     print(f"  夏普       {_f('sharpe', '.3f')}")
     print(f"  最大回撤   {_f('max_drawdown', '.2%')}")
     print(f"  胜率（平仓口径） {_f('win_rate', '.2%')}")
+    # v3.53 评审四轮·基准对齐：基准与策略必须同口径（H00300 全收益 vs 含息策略），
+    # 缺基准时显示占位不崩（None → "—"）
+    print(f"  基准收益   {_f('benchmark_return', '+.2%')}（{config.BENCHMARK}）")
+    print(f"  超额收益   {_f('excess_return', '+.2%')}")
     print(f"  成交笔数   {metrics.get('trade_count', 0)}")
 
 

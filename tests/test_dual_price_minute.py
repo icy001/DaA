@@ -254,3 +254,94 @@ def test_account_no_execution_model_raw_price_none():
                             warmup_ok=True, fill_now=True)
     assert r["status"] == "filled"
     assert account.trades[-1]["raw_price"] is None
+
+
+# ==================== 评审四轮·核实 b：除权日涨跌停参考价 ====================
+
+def _bare_backtester():
+    """不 run() 的引擎壳：只为调用 _build_prev_close 等纯逻辑。"""
+    from core.backtester import Backtester
+    return Backtester.__new__(Backtester)
+
+
+def test_ex_div_prev_close_uses_exchange_reference_price():
+    """除权日涨跌停前收 = 昨收 × (昨日因子/当日因子)——交易所除权参考价，
+    非直接昨收。600519 2025-06-26 实测：昨收 1435.86、因子比 0.98078
+    → 参考价 1408.27 ≈ 1435.86 − 27.624（每股现金红利）。"""
+    bt = _bare_backtester()
+    bt._prev_adj_factor = {"600519": 0.942063}
+    bars = {"600519": {"raw_close": 1435.86, "adj_factor": 0.960527,
+                       "close": 1435.86 * 0.960527}}
+    pc = bt._build_prev_close(bars)
+    assert pc["600519"] == pytest.approx(1435.86 * 0.942063 / 0.960527)
+    assert pc["600519"] == pytest.approx(1408.27, abs=0.5)   # ≈ 昨收 − 27.624
+
+
+def test_no_ex_div_prev_close_equals_raw_close():
+    """非除权日（因子比值=1）：前收就是昨收，行为不变。"""
+    bt = _bare_backtester()
+    bt._prev_adj_factor = {"600519": 0.960527}
+    bars = {"600519": {"raw_close": 1435.86, "adj_factor": 0.960527}}
+    assert bt._build_prev_close(bars)["600519"] == pytest.approx(1435.86)
+
+
+def test_daily_frame_prev_close_legacy():
+    """日线帧（无 raw 列）：前收沿用主列 close，既有行为不变。"""
+    bt = _bare_backtester()
+    bt._prev_adj_factor = {}
+    bars = {"600519": {"close": 42.38}}
+    assert bt._build_prev_close(bars)["600519"] == pytest.approx(42.38)
+
+
+# ==================== 评审四轮·事2：基准对齐（全收益指数） ====================
+
+def test_backtester_default_benchmark_follows_config():
+    """引擎基准默认集中引用 config.BENCHMARK（已换 H00300 全收益），
+    禁止硬编码 000300（价格指数不含股息，会系统性高估含息策略超额）。"""
+    from core.backtester import Backtester
+    from core.strategy import BaseStrategy
+
+    class _StubStrategy(BaseStrategy):   # 仅用于通过构造校验（不 run）
+        meta = {}
+
+        def on_bar(self, bars, date=None):
+            return []
+
+    bt = Backtester(_StubStrategy, symbols=["600519"])
+    assert bt.benchmark == "H00300"
+
+
+def test_csindex_partial_return_rejected(tmp_path, monkeypatch):
+    """中证官网接口部分返回（实测偶发 ~345 行）必须 raise，禁止残缺基准落缓存。"""
+    fetcher = _fetcher(tmp_path)
+    import pandas as _pd
+    short = _pd.DataFrame({
+        "日期": _pd.date_range("2025-01-01", periods=100).strftime("%Y-%m-%d"),
+        "收盘": [5000.0] * 100,
+    })
+    monkeypatch.setattr(fetcher, "_request", lambda *a, **k: short)
+    with pytest.raises(RuntimeError, match="部分返回"):
+        fetcher._fetch_csindex_ex_return("H00300", "2020-01-01", "2026-11-18")
+
+
+def test_csindex_ohlc_filled_with_close_not_dropped(tmp_path, monkeypatch):
+    """全收益指数无盘价（开盘列大面积 NaN）：用收盘价占位后不得被质量检查丢行，
+    且 attrs 必须标注 ohlc_filled_with_close=True（诚实披露，禁止静默）。"""
+    fetcher = _fetcher(tmp_path)
+    import numpy as _np
+    import pandas as _pd
+    dates = _pd.date_range("2020-01-01", periods=1600, freq="B")
+    raw = _pd.DataFrame({
+        "日期": dates.strftime("%Y-%m-%d"),
+        "开盘": _np.where(_np.arange(1600) < 300, 5000.0, _np.nan),   # 前段有盘价、后段缺
+        "最高": _np.where(_np.arange(1600) < 300, 5010.0, _np.nan),
+        "最低": _np.where(_np.arange(1600) < 300, 4990.0, _np.nan),
+        "收盘": 5000.0 + _np.arange(1600),
+    })
+    monkeypatch.setattr(fetcher, "_request", lambda *a, **k: raw)
+    out = fetcher._fetch_csindex_ex_return("H00300", "2020-01-01", "2026-11-18")
+    assert len(out) == 1600                                    # 一行不丢
+    assert out["close"].notna().all()
+    assert out.attrs["ohlc_filled_with_close"] is True
+    assert out.attrs["index_kind"] == "total_return"
+    assert out.attrs["basis_note"] == "全收益指数（含样本股分红再投资）"

@@ -206,7 +206,7 @@ class Backtester:
 
     def __init__(self, strategy_class, strategy_params: dict = None, symbols: List[str] = None,
                  start_date: str = None, end_date: str = None, initial_capital: float = None,
-                 benchmark: str = "000300", market_type: str = None, fetcher=None,
+                 benchmark: str = None, market_type: str = None, fetcher=None,
                  slippage: float = None, max_volume_pct: float = None,
                  run_mode: str = "backtest", adjust: str = "qfq",
                  logger: logging.Logger = None, output_dir=None,
@@ -226,7 +226,9 @@ class Backtester:
                             or pd.Timestamp.today().strftime("%Y-%m-%d"))
         self.initial_capital = float(config.INITIAL_CASH if initial_capital is None
                                       else initial_capital)
-        self.benchmark = str(benchmark or "000300")
+        # 基准默认集中引用 config.BENCHMARK（v3.53 评审四轮：换 H00300 全收益指数，
+        # 与策略含息记账同口径；禁止硬编码 000300 导致含息超额被系统性高估）
+        self.benchmark = str(benchmark or config.BENCHMARK)
         self.market_type = market_type
         self.run_mode = str(run_mode)
         self.adjust = str(adjust or "qfq")
@@ -262,6 +264,10 @@ class Backtester:
         self.margin_calls = 0
         self.state = {"date": None}
         self._prev_close: Dict[str, float] = {}
+        # 双价体系：各标的「上一根 bar 的 adj_factor」——除权日涨跌停参考价
+        # = 昨收 × (昨日因子/当日因子)（交易所除权参考价：昨收减现金红利/配股调整，
+        # 与因子比在因子表精度内等价；非除权日比值=1，行为不变）
+        self._prev_adj_factor: Dict[str, float] = {}
         self._lookahead_problems: List[str] = []
         # match_price_basis=next_*：决策 bar 与成交 bar 分离（订单排队到下一根撮合）
         self._bar_index = -1
@@ -457,9 +463,16 @@ class Backtester:
             strategy.dispatch_end_of_day(date)
             self._after_bar(date, prices)
             # 前收与撮合同空间（v3.53 双价体系）：bar 带 raw_close 时取原始价前收，
-            # 涨跌停校验在 raw 空间做（除权日 adj 前收跨因子跳变，比例失真）
-            self._prev_close = {s: float(b.get("raw_close") or b.get("close") or px)
-                                for s, b in bars.items()}
+            # 涨跌停校验在 raw 空间做（除权日 adj 前收跨因子跳变，比例失真）。
+            # 除权日涨跌停参考价（v3.53 评审四轮核实 b）：交易所按「昨收减现金红利、
+            # 配股调整后」的除权参考价定 ±10% 带，不是直接昨收——数学上
+            # 参考价 = 昨收 × (昨日因子/当日因子)，与交易所公式在因子表精度内等价
+            # （600519 2025-06-26 实测：昨收 1435.86 × 0.98078 = 1408.27 ≈ 1435.86 − 27.624）。
+            # 非除权日因子比值 = 1，行为与昨收完全一致。
+            self._prev_close = self._build_prev_close(bars)
+            self._prev_adj_factor = {
+                s: float(b.get("adj_factor") or 1.0)
+                for s, b in bars.items() if b.get("adj_factor")}
 
         if self._pending_orders:
             self.logger.warning("回测结束仍有 %d 笔排队订单未撮合（最后一根 bar 的信号无法"
@@ -471,6 +484,25 @@ class Backtester:
         return self._build_result(strategy)
 
     # ---------- 撮合时点（E1） ----------
+
+    def _build_prev_close(self, bars: Dict[str, dict]) -> Dict[str, float]:
+        """下一根 bar 的涨跌停前收（v3.53 评审四轮·除权参考价）。
+
+        - 双价帧（带 raw_close）：除权参考价 = raw 昨收 × (昨日因子/当日因子)，
+          与交易所「昨收减现金红利/配股调整」公式在因子表精度内等价；
+          非除权日比值 = 1 → 行为与昨收完全一致；
+        - 日线帧（无 raw 列）：沿用主列 close（既有行为不变）。
+        """
+        out = {}
+        for s, b in bars.items():
+            raw_c = b.get("raw_close")
+            if raw_c:
+                f_today = float(b.get("adj_factor") or 1.0)
+                f_prev = self._prev_adj_factor.get(s, f_today)
+                out[s] = float(raw_c) * (f_prev / f_today)
+            else:
+                out[s] = float(b.get("close") or 0)
+        return out
 
     def _queue_order(self, kwargs: dict) -> bool:
         """账户把订单交给引擎排队：记下决策 bar 下标，下一根 bar 以 fill_now 撮合。"""

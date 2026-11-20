@@ -411,7 +411,11 @@ DEFAULT_START = "2020-01-01"
 
 DEFAULT_END = ""
 
-BENCHMARK = "000300"
+# 回测基准（v3.53 评审四轮·基准对齐）：000300 价格指数不含股息，策略按前复权
+# （含息再投资）记账时超额被系统性高估 → 换沪深300全收益指数（含样本股分红再投资）；
+# 数据层经中证官网接口（data_fetcher._fetch_csindex_ex_return，唯一权威发布源）。
+# 若需扣 10% 红利税口径，换净收益指数 N00300。
+BENCHMARK = "H00300"
 
 DATA_CACHE_EXPIRE_DAYS = {
     "daily": 7,
