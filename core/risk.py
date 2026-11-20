@@ -337,17 +337,24 @@ class RiskManager:
             if not prev or prev <= 0:
                 continue
             change = px / prev - 1.0
-            if abs(change) < gap:
-                continue
-            self.logger.warning("黑天鹅保护：%s 单根跳空 %.2f%% ≥ %.0f%%，强制平仓",
-                                symbol, change * 100, gap * 100)
+            # 黑天鹅保护语义 = 「单根【跌】超 gap 保护性止损」（指令集 6.x 原文）。
+            # 旧实现 abs(change) 把暴涨也强平——港股 00700 2026-06-02 单日 +10.46%
+            # 触发多头强平卖飞（v3.54 港股预检发现）。风险方向拆分：多头防暴跌
+            # （change ≤ -gap）、空头防轧空（change ≥ +gap），方向不匹配不平仓
             for book, direction in ((self.account.positions, "sell"),
                                     (self.account.short_positions, "cover")):
                 pos = book.get(symbol)
-                if pos is not None and pos.volume > 0:
-                    actions.append({"symbol": symbol, "direction": direction,
-                                    "volume": pos.available, "price": px,
-                                    "reason": f"黑天鹅跳空 {change:.2%}"})
+                if pos is None or pos.volume <= 0:
+                    continue
+                hit = (change <= -gap) if direction == "sell" else (change >= gap)
+                if not hit:
+                    continue
+                self.logger.warning("黑天鹅保护：%s 单根%s %.2f%% ≥ %.0f%%，强制平仓",
+                                    symbol, "暴跌" if direction == "sell" else "轧空",
+                                    change * 100, gap * 100)
+                actions.append({"symbol": symbol, "direction": direction,
+                                "volume": pos.available, "price": px,
+                                "reason": f"黑天鹅跳空 {change:.2%}"})
         return actions
 
     def _stop_loss_actions(self, prices: Dict[str, float]) -> List[dict]:

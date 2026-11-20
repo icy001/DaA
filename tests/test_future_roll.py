@@ -351,5 +351,31 @@ def test_minute_series_gate_passes_for_supported():
                                            "2025-09-30", period="60min", variety="RB")
 
 
+def test_black_swan_direction_semantics():
+    """黑天鹅保护方向语义（港股预检发现）：多头防暴跌、空头防轧空——
+    旧 abs(change) 把暴涨也强平多头（00700 2026-06-02 +10.46% 卖飞实证）。"""
+    from core.risk import RiskManager
+    acc = TradingAccount(1_000_000, run_mode="backtest")
+    rm = RiskManager(acc)
+    pos = Position(symbol="00700", market="hk_stock", direction="long",
+                   volume=100, avg_cost=400.0, kind="spot")
+    acc.positions["00700"] = pos
+    rm._prev_prices = {"00700": 400.0}
+    # 暴涨 +10.46%（2026-06-02 实况）：多头不平仓
+    acts = rm._black_swan_actions({"00700": 441.84})
+    assert acts == [], "暴涨不应强平多头"
+    assert float(acc.positions["00700"].volume) == 100.0
+    # 暴跌 -10.46%：多头强平
+    acts = rm._black_swan_actions({"00700": 358.16})
+    assert len(acts) == 1 and acts[0]["direction"] == "sell"
+    # 空头轧空：暴涨强平空头
+    acc.positions.pop("00700")
+    acc.short_positions["00700"] = Position(
+        symbol="00700", market="hk_stock", direction="short", volume=100,
+        avg_cost=400.0, kind="spot")
+    acts = rm._black_swan_actions({"00700": 441.84})
+    assert len(acts) == 1 and acts[0]["direction"] == "cover"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
