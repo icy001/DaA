@@ -29,7 +29,8 @@ import pandas as pd
 import config
 from core.gov_compat import gov
 from core import signal_gate
-from core.account import DERIVATIVE_MARKETS, DerivativeMarketLiveForbidden, TradingAccount
+from core.account import (DERIVATIVE_MARKETS, DerivativeMarketLiveForbidden,
+                          LIVE_ALLOWED_MARKETS, LiveMarketForbidden, TradingAccount)
 from core.utils import setup_logger
 from broker.base_broker import ACCEPTED, FILLED, REJECTED, UNKNOWN, BrokerOrder
 from live import mode_guard
@@ -203,20 +204,28 @@ class LiveTrader:
         if direction not in ("buy", "sell", "short", "cover"):
             raise OrderPortError(f"非法方向 {direction!r}", stage="direction")
         self.kill_switch.assert_can_trade()
-        # 闸门7（v3.53 评审五轮）：实盘衍生品【市场】（场内期货/期权）直接 raise——
-        # DerivativeMarketLiveForbidden 不继承 LiveSafetyError，不会被 submit_order
-        # 捕获降级为 rejected，必须让调用方进程级感知并停机（非打印警告）。
-        # 场外衍生品（product_type 维度）由下方 DerivativeLiveForbidden 继续覆盖。
+        # 闸门7 白名单（v3.53 评审六轮）：实盘只允许 LIVE_ALLOWED_MARKETS 内的市场，
+        # 未显式列入的一律直接 raise（fail-closed 黑名单退役——防「新增衍生品市场
+        # 忘记登记 → 实盘静默漏拦」）。market 缺失按 symbol 兜底识别，【识别不出
+        # 必须默认拒绝】，不得当作普通市场放行。
+        # DerivativeMarketLiveForbidden / LiveMarketForbidden 均不继承 LiveSafetyError，
+        # submit_order 的拒单捕获无法吞掉，必须穿透到调用方进程级停机。
         if self.mode == "live" and not self.simulated:
             try:
                 dmarket = str(market or "").lower() or \
                     config.detect_market_type(symbol)
-            except Exception:  # noqa: BLE001 - 识别失败不放过：按未知市场走后续闸门
+            except Exception:  # noqa: BLE001 - 识别不出=未知市场：默认拒绝（fail-closed）
                 dmarket = ""
-            if dmarket in DERIVATIVE_MARKETS:
-                raise DerivativeMarketLiveForbidden(
-                    f"[live] {symbol}（{dmarket}）属衍生品市场，个人实盘禁止报单"
-                    "（闸门7硬拦，直接 raise 非警告）；仅回测/研究/仿真环境可运行")
+            if dmarket not in LIVE_ALLOWED_MARKETS:
+                if dmarket in DERIVATIVE_MARKETS:
+                    raise DerivativeMarketLiveForbidden(
+                        f"[live] {symbol}（{dmarket}）属衍生品市场且未列入 live 白名单，"
+                        "个人实盘禁止报单（闸门7硬拦，直接 raise 非警告）；"
+                        "开工须显式放行并附预检回执")
+                raise LiveMarketForbidden(
+                    f"[live] {symbol} 市场 {dmarket!r} 未列入 LIVE_ALLOWED_MARKETS "
+                    f"白名单（当前={sorted(LIVE_ALLOWED_MARKETS)}），直接 raise 硬拦；"
+                    "扩市场必须显式放行并附预检回执")
         if (str(product_type).lower() in DERIVATIVE_PRODUCTS
                 and not self.simulated and self.mode == "live"):
             raise DerivativeLiveForbidden(

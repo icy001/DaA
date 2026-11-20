@@ -17,7 +17,7 @@ import pandas as pd
 import pytest
 
 from core.account import (DERIVATIVE_MARKETS, DerivativeMarketLiveForbidden,
-                          TradingAccount)
+                          LIVE_ALLOWED_MARKETS, TradingAccount)
 
 
 # ==================== account 层（三引擎报单必经点） ====================
@@ -69,6 +69,68 @@ def test_forbidden_exception_not_safety_subclass():
 def test_derivative_markets_coverage():
     """拦截集合覆盖场内期货/期权三市场（otc_deriv 走既有 NAV 拒单通道）。"""
     assert DERIVATIVE_MARKETS == {"cn_future", "cn_option", "global_future"}
+
+
+# ==================== 评审六轮·闸门7 白名单化（fail-closed） ====================
+
+def test_live_mode_unregistered_market_rejected():
+    """白名单语义：未显式列入 LIVE_ALLOWED_MARKETS 的市场（如 cn_fund）
+    实盘一律 raise——「新增市场忘记登记」不再可能静默漏拦。"""
+    from core.account import LiveMarketForbidden
+    acc = TradingAccount(1_000_000, run_mode="live")
+    with pytest.raises(LiveMarketForbidden, match="白名单"):
+        acc.place_order(**_order_kwargs(symbol="511990", market_type="cn_fund"))
+
+
+def test_live_mode_unknown_symbol_defaults_to_reject():
+    """market 缺失且 symbol 兜底识别不出：默认拒绝（fail-closed），
+    不得当作普通市场放行。"""
+    from core.account import LiveMarketForbidden
+    acc = TradingAccount(1_000_000, run_mode="live")
+    with pytest.raises(LiveMarketForbidden):
+        acc.place_order(**_order_kwargs(symbol="XX9999", market_type=None))
+
+
+def test_live_mode_whitelisted_market_passes_market_gate():
+    """白名单内市场（cn_stock）不被市场闸拦截（走正常下单链路）。"""
+    from core.account import LiveMarketForbidden
+    acc = TradingAccount(1_000_000, run_mode="live")
+    try:
+        acc.place_order(warmup_ok=True, fill_now=True,
+                        symbol="600519", direction="buy", volume=100, price=10.0,
+                        order_time=pd.Timestamp("2026-01-05 10:00"),
+                        market_type="cn_stock")
+    except LiveMarketForbidden:
+        pytest.fail("白名单内市场被市场闸误拦")
+    except Exception:
+        pass   # 后续链路（时效闸门 refetch 等）异常不在本测试范围
+
+
+def test_whitelist_disjoint_from_derivative_markets():
+    """结构性确认：衍生品市场绝不在 live 白名单内（白名单与衍生品集合不相交）。"""
+    assert not (DERIVATIVE_MARKETS & LIVE_ALLOWED_MARKETS)
+
+
+def test_whitelist_is_minimal():
+    """初始白名单最小集：只含已具备实盘券商通道的 A 股现货族；
+    扩市场（含期货开工后的 cn_future）必须显式加入并附预检回执。"""
+    assert LIVE_ALLOWED_MARKETS == {"cn_stock", "cn_etf"}
+
+
+def test_live_trader_precheck_unregistered_market_raises():
+    """实盘收口同语义：未登记市场直接 raise（LiveMarketForbidden 穿透拒单捕获）。"""
+    from core.account import LiveMarketForbidden
+    lt = _bare_trader()
+    with pytest.raises(LiveMarketForbidden):
+        lt._precheck("buy", "cash", None, "511990", market="cn_fund")
+
+
+def test_live_trader_precheck_unknown_symbol_defaults_to_reject():
+    """实盘收口：symbol 兜底识别不出 → 默认拒绝（不得放行）。"""
+    from core.account import LiveMarketForbidden
+    lt = _bare_trader()
+    with pytest.raises(LiveMarketForbidden):
+        lt._precheck("buy", "cash", None, "XX9999", market=None)
 
 
 # ==================== live_trader 层（实盘报单唯一收口） ====================

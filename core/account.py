@@ -88,18 +88,28 @@ _NO_ORDER_MARKETS = {
     "trust": "信托产品走净值路径，不支持二级市场下单",
 }
 
-# v3.53 评审五轮·闸门7：场内衍生品市场（期货/期权）——实盘报单硬拦维度。
-# 语义：live 模式下报单【直接 raise】（非打印警告、非拒单返回），
-# 回测/研究/仿真（paper）放行；个人投资者仅允许衍生品仿真环境报单。
+# v3.53 评审五轮·闸门7：场内衍生品市场标识（黑名单退役，仅供回测启动提示等
+# 展示逻辑使用——报单拦截已由下方 LIVE_ALLOWED_MARKETS 白名单统一接管）
 DERIVATIVE_MARKETS = {"cn_future", "cn_option", "global_future"}
 
+# v3.53 评审六轮·闸门7 白名单化（fail-closed）：实盘允许交易的市场集合。
+# 语义：live 模式下 market ∈ 白名单才放行，【未显式列入的一律 raise】；
+# 新增市场（如期货开工后的 cn_future）必须显式加入并附预检回执，
+# 防止「新增衍生品市场忘记登记 → 实盘静默漏拦」的黑名单 fail-open。
+# 初始最小集 = 已具备实盘券商通道的 A 股现货族；扩市场 = 显式放行动作。
+LIVE_ALLOWED_MARKETS = {"cn_stock", "cn_etf"}
 
-class DerivativeMarketLiveForbidden(RuntimeError):
-    """实盘模式下衍生品市场报单——直接 raise 硬拦。
+
+class LiveMarketForbidden(RuntimeError):
+    """实盘模式下市场未列入 LIVE_ALLOWED_MARKETS 白名单——直接 raise 硬拦。
 
     刻意【不继承】LiveSafetyError 系拒单异常：实盘收口不得把它降级为
     一条 rejected 记录后继续运行，必须让调用方进程级感知并停机。
     """
+
+
+class DerivativeMarketLiveForbidden(LiveMarketForbidden):
+    """实盘模式下衍生品市场报单——白名单拦截的衍生品特化异常（保持既有引用兼容）。"""
 
 
 # 手续费计价货币（calc_commission 的返回值单位）
@@ -439,12 +449,18 @@ class TradingAccount:
             return self._reject(symbol, direction, "缺少有效价格（下单必须给出 price）")
 
         market = self._market_of(symbol, market_type)
-        # 闸门7（v3.53 评审五轮）：实盘衍生品报单直接 raise——三引擎报单必经点的
-        # fail-closed 硬拦（非打印警告、非拒单返回）；回测/研究/仿真放行
-        if self.run_mode == "live" and market in DERIVATIVE_MARKETS:
-            raise DerivativeMarketLiveForbidden(
-                f"[live] {market} 属衍生品市场，个人实盘禁止报单（闸门7硬拦，"
-                "直接 raise 非警告）；仅回测/研究/仿真环境可运行衍生品")
+        # 闸门7 白名单（v3.53 评审六轮）：live 模式下 market 必须显式列入
+        # LIVE_ALLOWED_MARKETS 才放行，未列入（含衍生品、识别不出）一律直接
+        # raise——fail-closed，防「新增市场忘记登记 → 实盘静默漏拦」
+        if self.run_mode == "live" and market not in LIVE_ALLOWED_MARKETS:
+            if market in DERIVATIVE_MARKETS:
+                raise DerivativeMarketLiveForbidden(
+                    f"[live] {market} 属衍生品市场且未列入 live 白名单，个人实盘"
+                    "禁止报单（闸门7硬拦，直接 raise 非警告）；开工须显式放行并附预检回执")
+            raise LiveMarketForbidden(
+                f"[live] 市场 {market!r} 未列入 LIVE_ALLOWED_MARKETS 白名单"
+                f"（当前={sorted(LIVE_ALLOWED_MARKETS)}），直接 raise 硬拦；"
+                "扩市场必须显式放行并附预检回执")
         if market in _NO_ORDER_MARKETS:
             return self._reject(symbol, direction, _NO_ORDER_MARKETS[market], market=market)
         if market == "cn_index":
