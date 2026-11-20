@@ -88,6 +88,20 @@ _NO_ORDER_MARKETS = {
     "trust": "信托产品走净值路径，不支持二级市场下单",
 }
 
+# v3.53 评审五轮·闸门7：场内衍生品市场（期货/期权）——实盘报单硬拦维度。
+# 语义：live 模式下报单【直接 raise】（非打印警告、非拒单返回），
+# 回测/研究/仿真（paper）放行；个人投资者仅允许衍生品仿真环境报单。
+DERIVATIVE_MARKETS = {"cn_future", "cn_option", "global_future"}
+
+
+class DerivativeMarketLiveForbidden(RuntimeError):
+    """实盘模式下衍生品市场报单——直接 raise 硬拦。
+
+    刻意【不继承】LiveSafetyError 系拒单异常：实盘收口不得把它降级为
+    一条 rejected 记录后继续运行，必须让调用方进程级感知并停机。
+    """
+
+
 # 手续费计价货币（calc_commission 的返回值单位）
 _MARKET_CCY = {
     "cn_stock": "CNY", "cn_etf": "CNY", "cn_convertible": "CNY", "cn_reits": "CNY",
@@ -425,6 +439,12 @@ class TradingAccount:
             return self._reject(symbol, direction, "缺少有效价格（下单必须给出 price）")
 
         market = self._market_of(symbol, market_type)
+        # 闸门7（v3.53 评审五轮）：实盘衍生品报单直接 raise——三引擎报单必经点的
+        # fail-closed 硬拦（非打印警告、非拒单返回）；回测/研究/仿真放行
+        if self.run_mode == "live" and market in DERIVATIVE_MARKETS:
+            raise DerivativeMarketLiveForbidden(
+                f"[live] {market} 属衍生品市场，个人实盘禁止报单（闸门7硬拦，"
+                "直接 raise 非警告）；仅回测/研究/仿真环境可运行衍生品")
         if market in _NO_ORDER_MARKETS:
             return self._reject(symbol, direction, _NO_ORDER_MARKETS[market], market=market)
         if market == "cn_index":

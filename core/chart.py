@@ -424,9 +424,12 @@ def _load_series(symbols: Sequence[str], start=None, end=None, period: str = "1d
 
 
 def plot_compare(symbols: Sequence[str], start=None, end=None, normalize: bool = True,
-                 benchmark: str = "000300", period: str = "1d", save: bool = True,
+                 benchmark: str = None, period: str = "1d", save: bool = True,
                  fetcher=None):
-    """多标的走势对比（归一化起点=1），可叠加基准（默认沪深300）。"""
+    """多标的走势对比（归一化起点=1），可叠加基准（默认 config.BENCHMARK）。"""
+    if benchmark is None:
+        import config
+        benchmark = config.BENCHMARK
     setup_chinese_font()
     syms = list(symbols)[:8]
     series = _load_series(syms, start, end, period, fetcher)

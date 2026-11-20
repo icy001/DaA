@@ -47,7 +47,7 @@ import pandas as pd
 
 import config
 from core import signal_gate
-from core.account import TradingAccount
+from core.account import DERIVATIVE_MARKETS, TradingAccount
 from core.execution import ExecutionModel  # 三引擎共用：只调用、不重写
 from core.strategy import BaseStrategy
 from core.utils import setup_logger
@@ -192,7 +192,10 @@ class BacktestResult:
                                           indent=2, default=str), encoding="utf-8")
         paths["metrics"] = str(metric_path)
         if plot:
-            fig_path = plot_results(self.nav, self.trades, self.metrics, self.benchmark,
+            # 基准曲线必须传 benchmark_frame（DataFrame：date + benchmark_equity）；
+            # 原传 self.benchmark（str 代码）导致绘图基准线从未画出（x2 排查整改）
+            fig_path = plot_results(self.nav, self.trades, self.metrics,
+                                    self.benchmark_frame,
                                     strategy_name=self.strategy_name, save_path=out / f"{base}.png")
             if fig_path:
                 paths["figure"] = str(fig_path)
@@ -200,6 +203,20 @@ class BacktestResult:
 
 
 # ==================== 主引擎 ====================
+
+def warn_derivative_research(deriv_markets, logger=None) -> None:
+    """闸门7（v3.53 评审五轮）：衍生品回测启动提示——放行但明确打印。
+
+    实盘路径硬拦在 core/account.py::place_order（三引擎必经）与
+    live/live_trader.py::_precheck（实盘收口，直接 raise 穿透拒单捕获）。
+    """
+    notice = ("衍生品回测仅用于研究，实盘路径硬拦：市场 " + ",".join(deriv_markets)
+              + " 在 live 模式下报单直接 raise（DerivativeMarketLiveForbidden）；"
+                "本回测结果不得作为实盘依据")
+    print(f"⚠ {notice}")
+    if logger is not None:
+        logger.warning("%s", notice)
+
 
 class Backtester:
     """逐日驱动的透明回测引擎。"""
@@ -388,6 +405,13 @@ class Backtester:
     def run(self) -> BacktestResult:
         if not self.frames:
             self.prepare()
+
+        # 闸门7（v3.53 评审五轮）：衍生品回测仅用于研究——放行但启动时明确打印；
+        # 实盘路径硬拦在 core/account.py::place_order 与 live/live_trader.py::_precheck
+        deriv_markets = sorted({self.market_of.get(s) or config.detect_market_type(s)
+                                for s in self.symbols} & DERIVATIVE_MARKETS)
+        if deriv_markets:
+            warn_derivative_research(deriv_markets, self.logger)
 
         self.account = TradingAccount(self.initial_capital, fetcher=self.fetcher,
                                       run_mode=self.run_mode, logger=self.logger)

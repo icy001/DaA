@@ -29,7 +29,7 @@ import pandas as pd
 import config
 from core.gov_compat import gov
 from core import signal_gate
-from core.account import TradingAccount
+from core.account import DERIVATIVE_MARKETS, DerivativeMarketLiveForbidden, TradingAccount
 from core.utils import setup_logger
 from broker.base_broker import ACCEPTED, FILLED, REJECTED, UNKNOWN, BrokerOrder
 from live import mode_guard
@@ -113,7 +113,7 @@ class LiveTrader:
                "mode": self.mode, "status": "rejected", "ok": False,
                "client_order_id": None, "stage": "", "reason": ""}
         try:
-            self._precheck(direction, product_type, bar, symbol)
+            self._precheck(direction, product_type, bar, symbol, market=market)
             self.reconciler.require_clean(before_order=True)
             self._gate_and_risk(symbol, direction, volume, price, bar, market,
                                 product_type)
@@ -198,10 +198,25 @@ class LiveTrader:
                 self.logger.warning("告警推送失败：%s", exc)
 
     # ==================== 内部：各道闸门 ====================
-    def _precheck(self, direction, product_type, bar, symbol) -> None:
+    def _precheck(self, direction, product_type, bar, symbol,
+                  market: str = None) -> None:
         if direction not in ("buy", "sell", "short", "cover"):
             raise OrderPortError(f"非法方向 {direction!r}", stage="direction")
         self.kill_switch.assert_can_trade()
+        # 闸门7（v3.53 评审五轮）：实盘衍生品【市场】（场内期货/期权）直接 raise——
+        # DerivativeMarketLiveForbidden 不继承 LiveSafetyError，不会被 submit_order
+        # 捕获降级为 rejected，必须让调用方进程级感知并停机（非打印警告）。
+        # 场外衍生品（product_type 维度）由下方 DerivativeLiveForbidden 继续覆盖。
+        if self.mode == "live" and not self.simulated:
+            try:
+                dmarket = str(market or "").lower() or \
+                    config.detect_market_type(symbol)
+            except Exception:  # noqa: BLE001 - 识别失败不放过：按未知市场走后续闸门
+                dmarket = ""
+            if dmarket in DERIVATIVE_MARKETS:
+                raise DerivativeMarketLiveForbidden(
+                    f"[live] {symbol}（{dmarket}）属衍生品市场，个人实盘禁止报单"
+                    "（闸门7硬拦，直接 raise 非警告）；仅回测/研究/仿真环境可运行")
         if (str(product_type).lower() in DERIVATIVE_PRODUCTS
                 and not self.simulated and self.mode == "live"):
             raise DerivativeLiveForbidden(
