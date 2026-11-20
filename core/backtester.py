@@ -128,6 +128,9 @@ class BacktestResult:
         self.run_mode: str = "backtest"
         self.symbols: List[str] = []
         self.params: dict = {}
+        # 引擎标识护栏（评审裁定六）：正式引擎结果必须携带 engine 标识，
+        # CLI 留痕快照落盘——「哪台引擎跑的」从此可审计
+        self.engine: str = "backtester"
 
     def to_cli_dict(self) -> dict:
         """CLI 留痕/打印所需的 dict 形态（与 core/runner.StrategyRunner._result 键兼容）。"""
@@ -137,6 +140,7 @@ class BacktestResult:
         return {
             "strategy": self.strategy_name,
             "run_mode": self.run_mode,
+            "engine": self.engine,
             "symbols": list(self.symbols),
             "params": dict(self.params),
             "nav": nav,

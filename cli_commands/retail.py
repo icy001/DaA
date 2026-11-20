@@ -82,6 +82,7 @@ def _dump_backtest_artifacts(args, result, symbols, start, end) -> None:
         snapshot = {
             "run_id": run_id,
             "spec_version": config.SPEC_VERSION,
+            "engine": result.get("engine", "backtester"),
             "surface_sha256": surface,
             "strategy": args.strategy,
             "symbols": list(symbols),

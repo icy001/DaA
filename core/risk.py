@@ -101,8 +101,9 @@ class RiskManager:
         self.halted = False
         self.halt_reason = ""
         self.halt_since = None          # 熔断起始日（随 halt_state 落盘）
-        self._stabilize_days = 0        # 熔断观察期：连续企稳天数
-        self._prev_equity: Optional[float] = None  # 企稳判定的上一日权益基准
+        self._stabilize_days = 0        # 熔断观察期：连续企稳【交易日】数
+        self._halt_low: Optional[float] = None   # 触发以来最低日终权益（创新低判据基准）
+        self._last_day_close: Optional[float] = None  # 最近一根 bar 的权益（日终=最后一根）
 
     # ==================== 权益与熔断 ====================
 
@@ -117,6 +118,13 @@ class RiskManager:
         if self._day != day:
             self._day = day
             self._day_start_equity = equity
+            # 熔断观察期推进按【交易日】计数（v3.53 裁定修正）：分钟级每根 bar
+            # 递增会把「3 日企稳」稀释成 3 bar（0.75 交易日），熔断强度随采样
+            # 频率漂移——观察值固定为上一交易日日终权益（_last_day_close 此时
+            # 尚未被当日 bar 覆盖），换日才推进；_day 先更新使解除日志记「生效日」
+            if self.halted:
+                self._advance_halt_observation()
+        self._last_day_close = equity   # 当根权益；日终（最后一根 bar）即日终权益
         self._peak_equity = max(self._peak_equity or equity, equity)
         self._update_halt(equity)
 
@@ -144,9 +152,9 @@ class RiskManager:
 
     def _update_halt(self, equity: float) -> None:
         if self.halted:
-            # 熔断观察期：不再立即重判（旧逻辑每日复位→每日重熔 = 死锁），
-            # 改为观察权益是否企稳，连续 N 日未创新低自动解除
-            self._observe_recovery(equity)
+            # 熔断观察期：推进只在换日（_advance_halt_observation），
+            # 不再逐 bar 判定——逐 bar 会把「3 日企稳」按 bar 稀释（B-1 死锁
+            # 修复后评审二轮抓出的强度漂移），日内也不重复触发
             return
         if self._day_start_equity and self._day_start_equity > 0:
             loss = equity / self._day_start_equity - 1.0
@@ -159,31 +167,44 @@ class RiskManager:
                 self._halt(f"权益回撤 {drawdown:.2%} 触及熔断线 "
                            f"{self.max_drawdown_pct_stop:.2%}，停止开仓")
 
-    def _observe_recovery(self, equity: float) -> None:
-        """熔断观察期：连续 N 个交易日权益未再创新低（企稳）→ 自动解除。
+    def _advance_halt_observation(self) -> None:
+        """换日推进熔断观察期（企稳单位 = 交易日，双频等强）。
 
-        解除时把回撤峰值基准重置为当前权益——不清基准会在解除当天被旧峰值
-        再次熔断（B-1 死锁根源）。逐日更新企稳计数，创新低即归零。
+        观察值 = 上一交易日日终权益（_last_day_close 在换日时尚未被当日 bar
+        覆盖，即上一日最后一根 bar 的权益）。判据 = 未跌破触发以来最低日终
+        权益（「不创新低」，接受持平）；创新低即归零。连续
+        ``halt_recover_stabilize_days`` 个交易日未创新低 → 解除，解除时把
+        回撤峰值基准重置为解除日权益（不清基准会在解除当天被旧峰值再熔，
+        即首轮 2022-02-25 起 4.7 年 175 笔连续拒单死锁的根因）。
         """
         if not self.halt_recover_enabled:
             return
-        if self._prev_equity is None or self._prev_equity <= 0:
-            self._prev_equity = float(equity)
-            self._write_state_file()
+        obs = self._last_day_close
+        if obs is None or obs <= 0:
             return
-        if float(equity) >= self._prev_equity:
-            self._stabilize_days += 1
-        else:
+        new_low = self._halt_low is None or obs < self._halt_low
+        if new_low:
+            self._halt_low = float(obs)
             self._stabilize_days = 0
-        self._prev_equity = float(equity)
+        else:
+            self._stabilize_days += 1
+        released = self._stabilize_days >= self.halt_recover_stabilize_days
+        # 状态机逐日日志（评审要求：每日权益是否创新低/企稳计数/状态转移可自证）
+        self.logger.info(
+            "[HALT_OBS] day=%s obs=%.2f halt_low=%.2f stabilize=%d/%d action=%s",
+            self._day, obs, self._halt_low, self._stabilize_days,
+            self.halt_recover_stabilize_days,
+            "released" if released else ("reset(创新低)" if new_low else "hold"))
         if self._stabilize_days >= self.halt_recover_stabilize_days:
             reason = self.halt_reason
+            released_at = self._day
             self.reset_halt()
-            self._peak_equity = float(equity)   # 解除日权益为新回撤基准
+            self._peak_equity = float(obs)   # 解除日权益为新回撤基准
+            self._halt_low = None
             self.logger.warning(
-                "风控熔断自动恢复：连续 %d 个交易日权益企稳（未创新低），解除熔断"
-                "（原因：%s），回撤基准重置为 %.2f，恢复开仓",
-                self.halt_recover_stabilize_days, reason, equity)
+                "风控熔断自动恢复：连续 %d 个交易日权益未创新低（企稳），解除熔断"
+                "（触发日 %s，原因：%s），回撤基准重置为 %.2f，恢复开仓",
+                self.halt_recover_stabilize_days, released_at, reason, obs)
         else:
             self._write_state_file()
 
@@ -192,7 +213,7 @@ class RiskManager:
         self.halt_reason = reason
         self.halt_since = self._day
         self._stabilize_days = 0
-        self._prev_equity = None   # 观察期从次日开始比较
+        self._halt_low = None   # 观察期从次日开始：首次 advance 以触发日日终为基准
         self.logger.warning("风控熔断：%s", reason)
         self._write_state_file()
 
@@ -202,7 +223,7 @@ class RiskManager:
         self.halt_reason = ""
         self.halt_since = None
         self._stabilize_days = 0
-        self._prev_equity = None
+        self._halt_low = None
         if manual:
             self.logger.warning("风控熔断人工复位：由操作者经 CLI 显式解除（需二次确认），恢复开仓")
         self._write_state_file()

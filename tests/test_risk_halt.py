@@ -175,35 +175,59 @@ def _run_day(rm, date, equity):
 
 
 def test_halt_triggers_at_drawdown_then_recovers_after_stabilize():
-    """熔断触发不变；连续 3 日权益未创新低自动解除，且回撤基准重置为解除日权益。"""
+    """熔断触发不变；企稳按【交易日】推进（观察值=上一日日终），
+    连续 3 个交易日未创新低 → 解除，解除日权益为新回撤基准（防再熔死锁）。"""
     rm = _make_risk(halt_recover_stabilize_days=3)
     _run_day(rm, "2022-02-23", 100.0)          # 峰值 100
     _run_day(rm, "2022-02-24", 89.0)           # 回撤 -11% → 熔断
     assert rm.halted is True
     assert rm.halt_since == _date(2022, 2, 24)   # v3.53：分钟级换日按日期部分归一
-    # 观察期：首日仅记基准，此后连续 3 日未创新低
-    _run_day(rm, "2022-02-25", 89.0)           # 首观察日，stabilize=0
-    _run_day(rm, "2022-02-28", 89.0)           # 企稳 1
-    _run_day(rm, "2022-03-01", 89.5)           # 企稳 2
+    # 观察期（换日推进，观察值=上一日日终）：D1 记基准，此后连续 3 日未创新低
+    _run_day(rm, "2022-02-25", 89.0)           # D1：advance(02-24 日终 89) → 基准, stab=0
+    _run_day(rm, "2022-02-28", 89.0)           # D2：advance(02-25 日终 89) → stab=1
+    _run_day(rm, "2022-03-01", 89.5)           # D3：advance(02-28 日终 89) → stab=2
     assert rm.halted is True
-    _run_day(rm, "2022-03-02", 90.0)           # 企稳 3 → 解除
+    _run_day(rm, "2022-03-02", 90.0)           # D4：advance(03-01 日终 89.5) → stab=3 → 解除
     assert rm.halted is False
     assert rm._peak_equity == pytest.approx(90.0)   # 解除日权益为新基准（防再熔死锁）
     assert rm.check_open("X", 1, 10.0) is None      # 恢复开仓（小单避开单票 20% 上限）
 
 
+def test_halt_stabilize_counts_trading_days_not_bars():
+    """v3.53 评审裁定二（双频等强）：分钟级同一 config 下「触发→解除」间隔
+    必须与日线一致（3 个交易日），不得被 bar 数稀释（旧实现 3 bar≈0.75 日，
+    #4 曾同日触发同日解除）。"""
+    rm = _make_risk(halt_recover_stabilize_days=3, daily_loss_pct_stop=1.0)
+    import pandas as pd
+    # 分钟节拍：每日 4 根 bar（模拟 60min）。09-25 首根 100 设峰值、当日内 89 触发；
+    # 之后各日全天 89（横盘不创新低）
+    for i, d in enumerate(["2025-09-25", "2025-09-26", "2025-09-29",
+                            "2025-09-30", "2025-10-09", "2025-10-10"]):
+        for j, hm in enumerate(["10:30", "11:30", "14:00", "15:00"]):
+            eq = 100.0 if (i == 0 and j == 0) else 89.0
+            _run_day(rm, pd.Timestamp(f"{d} {hm}"), eq)
+    assert rm.halted is False   # 09-25 11:30 触发；10-09 换日 advance(09-30 日终) stab=3 解除
+    # 企稳日 = 09-26 / 09-29 / 09-30 三个交易日（各 4 根 bar 只推进 1 次计数）；
+    # 旧逐 bar 语义下 09-25 当日 14:00 就会解除（3 bar≈0.75 日）——双频等强回归点
+    # （解除日在 10-09 首根 bar 换日：09-26/29/30 三日未创新低之后）
+
+
 def test_halt_recovery_resets_on_new_low():
-    """观察期内创新低 → 企稳计数归零，恢复重新起算。"""
+    """观察期内创新低（跌破触发以来最低日终权益）→ 企稳计数归零，重新起算。
+    注意换日 advance 用「上一日日终」：d5 的 88 要到 d6 换日才进观察。"""
     rm = _make_risk(halt_recover_stabilize_days=3)
     _run_day(rm, "d1", 100.0)
     _run_day(rm, "d2", 89.0)                    # 熔断
-    _run_day(rm, "d3", 89.0)                    # 观察 0
-    _run_day(rm, "d4", 89.0)                    # 企稳 1
-    _run_day(rm, "d5", 88.0)                    # 创新低 → 归零
+    _run_day(rm, "d3", 89.0)                    # advance(d2 日终 89) → 基准 stab=0
+    _run_day(rm, "d4", 89.0)                    # advance(d3 日终 89) → stab=1
+    _run_day(rm, "d5", 88.0)                    # advance(d4 日终 89) → stab=2（d5 的 88 明日才入观察）
+    assert rm.halted is True
+    _run_day(rm, "d6", 88.0)                    # advance(d5 日终 88 < 89) → 创新低归零
     assert rm.halted is True and rm._stabilize_days == 0
-    _run_day(rm, "d6", 88.0)
-    _run_day(rm, "d7", 88.0)
-    _run_day(rm, "d8", 88.5)
+    _run_day(rm, "d7", 88.0)                    # advance(d6 日终 88) → stab=1
+    _run_day(rm, "d8", 88.5)                    # advance(d7 日终 88) → stab=2
+    assert rm.halted is True
+    _run_day(rm, "d9", 88.5)                    # advance(d8 日终 88) → stab=3 → 解除
     assert rm.halted is False                   # 重新起算满 3 日后解除
 
 
@@ -362,3 +386,35 @@ def test_signal_log_risk_block_path(tmp_path, caplog):
     assert rec["status"] == "rejected" and rec["stage"] == "risk"
     sigs = [r for r in caplog.records if "[SIGNAL]" in r.getMessage()]
     assert len(sigs) == 1 and "risk_block" in sigs[0].getMessage()
+
+
+# ==================== 引擎选择护栏（评审裁定六：D-1 假绿教训） ====================
+
+def test_lightweight_runner_forbids_backtest_mode():
+    """护栏：StrategyRunner（轻量执行器）在 backtest 路径必须直接拒绝启动——
+    它不执行滑点/量限/涨跌停/撮合时点断言，首轮「全部 next_open」验收即
+    在此路径上假绿（D-1）。正式回测唯一入口 = Backtester。"""
+    import pytest as _pytest
+    from core.runner import StrategyRunner
+    from core.strategy_loader import get
+    runner = StrategyRunner(get("double_ma_cross"), symbols=["600519"],
+                            start="2020-01-01", end="2020-03-31",
+                            run_mode="backtest", period="1d")
+    with _pytest.raises(RuntimeError, match="禁止承担 backtest"):
+        runner.run()
+
+
+def test_backtest_result_carries_engine_tag():
+    """护栏：正式引擎结果必须携带 engine 标识（CLI 快照落盘可审计）。"""
+    import logging
+    from core.backtester import Backtester
+    from core.strategy_loader import get
+    logging.disable(logging.CRITICAL)
+    try:
+        bt = Backtester(get("double_ma_cross"), symbols=["600519"],
+                        start_date="2019-11-01", end_date="2020-03-31",
+                        initial_capital=1000000)
+        r = bt.run().to_cli_dict()
+    finally:
+        logging.disable(logging.NOTSET)
+    assert r["engine"] == "backtester"

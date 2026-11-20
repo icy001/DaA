@@ -99,6 +99,15 @@ class StrategyRunner:
     # ==================== 主循环 ====================
 
     def run(self) -> dict:
+        # 引擎选择护栏（v3.53 评审裁定六）：轻量执行器【禁止】承担正式回测。
+        # D-1 实训：首轮 CLI 走本执行器 → 同根收盘价成交、滑点/量限/涨跌停/
+        # LookaheadError 断言全部未执行，闸门「通过」实为「未曾验证」（假绿）。
+        # 正式回测唯一入口 = core/backtester.Backtester（引擎标识随结果落盘）。
+        if self.run_mode == "backtest":
+            raise RuntimeError(
+                "StrategyRunner(轻量执行器) 禁止承担 backtest：不执行滑点/量限/"
+                "涨跌停/撮合时点断言，回测结论不可采信（D-1 假绿教训）。"
+                "正式回测请走 core.backtester.Backtester（CLI backtest 已接入）")
         if not self.frames:
             self.load()
         dates = sorted({d for frame in self.frames.values() for d in frame.index})

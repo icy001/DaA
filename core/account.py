@@ -1177,10 +1177,12 @@ class TradingAccount:
                 self.logger.info("期权到期 %s 行权收益 %.2f", symbol, payoff)
                 book.pop(symbol, None)
 
-        # 5) 快照
+        # 5) 快照（分钟级保留完整 bar 时间戳：日期部分用于换日记账，快照
+        # date 保留原始精度，防 equity.csv 同日多行无法区分（v3.53 评审二轮）
         equity = self.calc_equity(prices)
+        snap_date = date if date is not None and not isinstance(date, str) else day
         snapshot = {
-            "date": day, "equity": round(equity, 2), "cash": round(self.cash, 2),
+            "date": snap_date, "equity": round(equity, 2), "cash": round(self.cash, 2),
             "frozen_cash": round(self.frozen_cash, 2),
             "margin_used": round(self.margin_used, 2),
             "position_count": len(self.positions) + len(self.short_positions),
