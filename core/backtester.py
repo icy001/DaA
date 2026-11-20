@@ -456,7 +456,10 @@ class Backtester:
             # 8：日终回调
             strategy.dispatch_end_of_day(date)
             self._after_bar(date, prices)
-            self._prev_close = {s: float(b.get("close") or px) for s, b in bars.items()}
+            # 前收与撮合同空间（v3.53 双价体系）：bar 带 raw_close 时取原始价前收，
+            # 涨跌停校验在 raw 空间做（除权日 adj 前收跨因子跳变，比例失真）
+            self._prev_close = {s: float(b.get("raw_close") or b.get("close") or px)
+                                for s, b in bars.items()}
 
         if self._pending_orders:
             self.logger.warning("回测结束仍有 %d 笔排队订单未撮合（最后一根 bar 的信号无法"

@@ -217,13 +217,29 @@ class ExecutionModel:
         if market in NAV_PASSTHROUGH_MARKETS:
             return {"price": float(price), "volume": float(volume)}
 
-        open_px = float(bar.get("open") or 0) or float(price)
-        high = float(bar.get("high") or open_px)
-        low = float(bar.get("low") or open_px)
-        close = float(bar.get("close") or open_px)
+        # ---- 双价体系（v3.53 评审三轮）：bar 携带 raw_* 列时撮合切 raw 空间 ----
+        # 涨跌停/滑点/成交价必须与交易所实际报价（raw）一致：同一交易日内
+        # adj = raw × adj_factor（因子按所属交易日恒定），日内比例运算两空间等价，
+        # 但除权日「前收→今价」跨因子变化的比例仅在 raw 空间真实，涨跌停校验
+        # 若误用 adj 空间前收会把正常开盘误判为跳空涨跌停（假拒绝）。
+        # 策略信号/权益/回撤仍消费主列复权价（消除除权跳空假信号）。
+        raw_open = bar.get("raw_open")
+        adj_factor = 1.0
+        if raw_open:
+            open_px = float(raw_open)
+            high = float(bar.get("raw_high") or open_px)
+            low = float(bar.get("raw_low") or open_px)
+            close = float(bar.get("raw_close") or open_px)
+            adj_factor = float(bar.get("adj_factor") or 1.0)
+        else:
+            open_px = float(bar.get("open") or 0) or float(price)
+            high = float(bar.get("high") or open_px)
+            low = float(bar.get("low") or open_px)
+            close = float(bar.get("close") or open_px)
         buy_side = str(direction) in ("buy", "cover")
 
         # ---- 涨跌停：开盘即涨停买不进 / 开盘即跌停卖不出 ----
+        # prev_close 必须与撮合同空间（raw 优先，见引擎侧 _prev_close 构建）
         pct = TradingAccount.price_limit_pct(market, symbol, rule)
         pc = self.prev_close.get(str(symbol))
         if self.zdt_reject_on_open and pct and pc and pc > 0:
@@ -239,7 +255,8 @@ class ExecutionModel:
         # ---- 限价单撮合 ----
         fill_px = None
         if order_type == "limit":
-            limit_px = float(price)
+            # 策略限价是复权口径（信号空间）：换算到 raw 空间与当日区间比较
+            limit_px = float(price) / (adj_factor or 1.0)
             if buy_side and low <= limit_px:
                 fill_px = min(limit_px, open_px)       # 开盘更优则按开盘成交
             elif (not buy_side) and high >= limit_px:
@@ -275,5 +292,13 @@ class ExecutionModel:
                 self.logger.debug("%s 单笔委托超过当日量 %.2f%%，截断为 %.4f",
                                   symbol, pct_cap * 100, cap_units)
 
-        return {"price": round(float(fill_px), 8), "volume": float(volume),
-                "capped": capped, "open": open_px, "close": close}
+        raw_fill = float(fill_px)
+        # 记账价换算回复权空间（账户现金/pnl/权益全部按复权口径记账，跨除权日连续）；
+        # raw_price 为交易所实际成交价（成交记录披露口径）
+        book_px = raw_fill * adj_factor
+        out = {"price": round(book_px, 8), "volume": float(volume),
+               "capped": capped, "open": open_px, "close": close}
+        if raw_open:
+            out["raw_price"] = round(raw_fill, 8)
+            out["adj_factor"] = adj_factor
+        return out

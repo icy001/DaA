@@ -174,6 +174,9 @@ class TradingAccount:
         self.deferred_executor = None
         # 引擎当前 bar 下标（same_* 同根撮合时交给未来函数断言）
         self.current_bar_index = None
+        # 双价体系（v3.53 评审三轮）：成交模型返回的 raw 实际成交价，
+        # 仅用于成交记录披露（raw_price 列）；记账价始终是复权口径 price
+        self._last_raw_fill = None
 
     # ==================== 基础工具 ====================
 
@@ -399,6 +402,8 @@ class TradingAccount:
         symbol = str(symbol).strip()
         direction = str(direction or "").lower()
         order_type = str(order_type or "market").lower()
+        # 双价体系：上一单残留的 raw 成交价必须清除（防中途异常残留串单）
+        self._last_raw_fill = None
         day = self._to_date(order_time)
         self._roll_to(day)
 
@@ -622,6 +627,9 @@ class TradingAccount:
                 return self._reject(symbol, direction, decision["reject"], market=market)
             price = float(decision.get("price", price) or price)
             volume = float(decision.get("volume", volume) or volume)
+            # 双价体系：暂存 raw 实际成交价（_trade_record 落盘 raw_price 列）；
+            # 记账 price 已是复权口径（成交模型内 raw_fill × adj_factor 换算）
+            self._last_raw_fill = decision.get("raw_price")
 
         # ---------- 资金 / 保证金 / 成交 ----------
         try:
@@ -985,11 +993,17 @@ class TradingAccount:
 
     def _trade_record(self, order_id, symbol, market, direction, action, price, volume,
                       fee, realized, order_time) -> dict:
+        # 双价体系：raw_price = 交易所实际成交价（撮合/披露口径）；
+        # price = 复权口径记账价（现金/pnl/权益）。未挂成交模型时两者一致（None）
+        raw_fill = self._last_raw_fill
+        self._last_raw_fill = None
         return {
             "order_id": order_id, "symbol": symbol, "market": market,
             "direction": direction, "action": action, "price": round(float(price), 6),
             "volume": float(volume), "commission": round(float(fee), 2),
             "pnl": round(float(realized), 2),
+            "raw_price": (round(float(raw_fill), 6)
+                          if raw_fill is not None else None),
             "timestamp": order_time or datetime.now(),
             "cash_after": round(self.cash, 2),
             "margin_used": round(self.margin_used, 2),

@@ -565,10 +565,26 @@ class DataFetcher:
             return None
 
     def _apply_adjust(self, raw: pd.DataFrame, factor: Optional[pd.DataFrame],
-                      adjust: str, market: str = None, symbol: str = None) -> pd.DataFrame:
-        """复权价 = 原始价 × 因子（成交量/成交额不随复权变化）。"""
+                      adjust: str, market: str = None, symbol: str = None,
+                      keep_raw: bool = False) -> pd.DataFrame:
+        """复权价 = 原始价 × 因子（成交量/成交额不随复权变化）。
+
+        keep_raw=True（双价体系）：主列 OHLC 为复权价的同时保留 raw_open/high/low/close
+        原始价列与 adj_factor 因子列。价权边界（评审三轮裁定）：
+          - 信号生成/收益计算/回撤熔断判定 → 主列复权价（消除除权跳空假信号）；
+          - 下单股数/涨跌停校验/滑点/成交记录 → raw_* 列（与交易所实际报价一致）。
+        同一交易日内 adj = raw × adj_factor（因子按所属交易日折算），撮合在 raw
+        空间做比例运算、记账换算回复权空间做金额运算。
+        """
         if factor is None or factor.empty:
             out = raw.copy()
+            if keep_raw:
+                # 双价声明仍然成立：adj 退化为 raw 恒等（无可用因子），
+                # 下游撮合消费 raw_* 列的行为不受影响
+                for _c in _PRICE_COLUMNS:
+                    out[f"raw_{_c}"] = raw[_c]
+                out["adj_factor"] = 1.0
+                out.attrs["dual_price"] = True
             out.attrs["adjust_fallback"] = True
             out.attrs["adjust"] = "none"
             self.logger.warning("[复权] %s %s 无复权因子，本次返回不复权价（adjust=none）",
@@ -591,18 +607,30 @@ class DataFetcher:
             .sort_index().ffill().bfill().reindex(target_index)
         series.index = raw.index
         out = raw.copy()
+        if keep_raw:
+            # 双价体系：在乘因子【之前】保存原始价（乘后主列已是复权口径）
+            for _c in _PRICE_COLUMNS:
+                out[f"raw_{_c}"] = raw[_c]
         # 判定「源不支持复权」必须看因子全历史是否恒为 1；只看请求窗口会误伤
         # 无除权事件的短窗口（如近 30 天窗口因子合法地全为 1.0）
         factor_history = pd.to_numeric(factor[col], errors="coerce").dropna()
-        if not factor_history.empty and np.allclose(factor_history.to_numpy(dtype=float), 1.0):
+        factor_all_one = (not factor_history.empty
+                          and np.allclose(factor_history.to_numpy(dtype=float), 1.0))
+        if factor_all_one:
             # 因子恒为 1 = 该源不支持复权（如新浪 ETF 回退源），不能伪装成 qfq 成功
             out.attrs["adjust"] = "none"
             self.logger.warning("[复权] %s %s 复权因子恒为 1（数据源不支持复权），本次返回不复权价（adjust=none）",
                                 market or "-", symbol or "-")
         for price_col in _PRICE_COLUMNS:
             out[price_col] = out[price_col] * series
+        if keep_raw:
+            # adj_factor 列：每根 bar 所属交易日的折算因子（分钟 bar 同日共享该日因子）
+            out["adj_factor"] = series
+            out.attrs["dual_price"] = True
         out.attrs.update(raw.attrs)
-        out.attrs["adjust"] = str(adjust)  # 成功应用因子：以实际口径覆盖 raw 的标注
+        # 成功应用因子：以实际口径覆盖 raw 的标注；恒1降级保持 none（禁止伪装 qfq 成功）
+        if not factor_all_one:
+            out.attrs["adjust"] = str(adjust)
         return out
 
     def _normalize_adjust(self, adjust: str) -> str:
@@ -931,7 +959,19 @@ class DataFetcher:
         else:
             out = self.get_minute(symbol, str(config.PERIOD_TO_MINUTE[period]),
                                   start_date, end_date, market_type=market_type)
-            out.attrs.setdefault("adjust", "none")
+            adj_norm = self._normalize_adjust(adjust)
+            market, _ = self._detect_market(symbol, market_type)
+            if adj_norm and market == "cn_stock":
+                # v3.53 评审三轮（双价体系）：cn_stock 分钟线复权走 BaoStock 因子折算，
+                # 不再降级 adjust=none。主列 = 复权价（信号/收益/回撤/熔断消费），
+                # raw_* 列 = 原始价（撮合/股数/涨跌停/滑点/成交记录消费），
+                # 因子按 bar 所属交易日折算（日频因子 ffill 到分钟索引）。
+                factor = self._get_adj_factor(market, symbol, start_date)
+                out = self._apply_adjust(out, factor, adj_norm, market, symbol,
+                                         keep_raw=True)
+            else:
+                # 非 cn_stock 分钟线暂无已验证因子源：显式降级标注（禁止伪装复权成功）
+                out.attrs.setdefault("adjust", "none")
         out.attrs["period"] = period
         return self._attach_asof(out, asof=asof)
 
