@@ -361,15 +361,30 @@ class TradingAccount:
             multiplier = float(rule.get("multiplier", 1) or 1)
             notional = price * multiplier * volume
             mode = str(rule.get("commission_type", "per_value"))
+            # 消费侧一致性守卫（v3.54 评审终验后补）：登记规格的键名族必须与
+            # commission_type 匹配且被引擎读到非零——终验曾扫出 14 品种 per_lot
+            # 误标 rate 键名致手续费静默按 0 收取（看着对的错账）。注意合并后
+            # 的 rule 恒含 MARKETS 基础配置的 6 个费率键（值=0），必须校验
+            # 【品种级 spec】显式声明 + 非零，缺一 raise，禁止静默 0 费率
             if mode == "per_lot":
                 key = ("commission_per_lot_open" if is_open else
                        ("commission_per_lot_close_today" if is_close_today
                         else "commission_per_lot_close"))
-                return r2(float(rule.get(key, 0) or 0) * volume)
-            key = ("commission_rate_open" if is_open else
-                   ("commission_rate_close_today" if is_close_today
-                    else "commission_rate_close"))
-            return r2(notional * float(rule.get(key, 0) or 0))
+            else:
+                key = ("commission_rate_open" if is_open else
+                       ("commission_rate_close_today" if is_close_today
+                        else "commission_rate_close"))
+            variety = "".join(c for c in str(symbol).upper() if c.isalpha())
+            v_spec = config.CN_FUTURES_VARIETY.get(variety) or {}
+            if key not in v_spec or not float(v_spec.get(key) or 0) > 0:
+                raise ValueError(
+                    f"期货品种 {variety} 费率键 {key} 未在品种规格中登记为正值"
+                    f"（commission_type={mode}）：登记与消费不一致，"
+                    "拒绝按 0 费率静默计费")
+            fee = float(rule[key] or 0)
+            if fee <= 0:
+                raise ValueError(f"期货品种 {variety} 费率 {key} 合并解析为 0（登记与消费不一致）")
+            return r2(fee * volume if mode == "per_lot" else notional * fee)
 
         if market == "global_future":
             return r2(float(rule.get("commission", 0) or 0) * volume)

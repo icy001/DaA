@@ -281,5 +281,75 @@ def test_variety_spec_five_keys_complete():
         assert not miss_fee, f"{variety} 缺费率键 {miss_fee}"
 
 
+def test_variety_key_family_matches_commission_type_exhaustive():
+    """常驻穷举守卫（评审裁定：不得停在一次性脚本）：键名族 × commission_type
+    一致性全品种校验——per_lot ↔ commission_per_lot_*、per_value ↔
+    commission_rate_*，且另一族键不得混入品种级 spec（终验 14 品种误标 bug
+    正是键名族错位，五件套测试与值指纹都看不见）。"""
+    for variety, spec in config.CN_FUTURES_VARIETY.items():
+        ct = spec.get("commission_type")
+        if ct == "per_lot":
+            assert not ({"commission_rate_open", "commission_rate_close",
+                         "commission_rate_close_today"} & set(spec)), \
+                f"{variety} per_lot 却混入 commission_rate_* 键"
+        elif ct == "per_value":
+            assert not ({"commission_per_lot_open", "commission_per_lot_close",
+                         "commission_per_lot_close_today"} & set(spec)), \
+                f"{variety} per_value 却混入 commission_per_lot_* 键"
+        else:
+            pytest.fail(f"{variety} commission_type 非法：{ct!r}")
+
+
+def test_engine_reads_nonzero_fee_for_every_variety():
+    """常驻穷举守卫（消费侧）：31 品种 × 开/平/平今三类动作，引擎
+    calc_commission 必须读到非零费率——「登记了没被消费」在运行路径即失败。"""
+    acc = TradingAccount(1_000_000, run_mode="backtest")
+    for variety, spec in config.CN_FUTURES_VARIETY.items():
+        symbol = f"{variety}2601"
+        price = 10_000.0
+        for is_open, is_close_today in ((True, False), (False, False), (False, True)):
+            fee = acc.calc_commission(symbol, "sell" if not is_open else "buy",
+                                      price, 1, is_close_today=is_close_today,
+                                      market_type="cn_future", is_open=is_open)
+            assert fee > 0, (f"{variety} {'开仓' if is_open else '平今' if is_close_today else '平昨'}"
+                             f"费率被解析为 0（登记与消费不一致）")
+
+
+def test_minute_series_supported_boundary_fail_closed():
+    """品种适用边界 fail-closed（评审裁定：边界由白名单表达，不由注释表达）：
+    夜盘跨午夜品种（SC/CU/AU 等 9 个）分钟序列显式拒绝；支持品种标志齐全。"""
+    supported = {v for v, s in config.CN_FUTURES_VARIETY.items()
+                 if s.get("minute_series_supported")}
+    unsupported = set(config.CN_FUTURES_VARIETY) - supported
+    # 跨午夜品种全部未置位
+    assert {"SC", "CU", "AL", "ZN", "AU", "AG", "NI", "SS", "SI"} <= unsupported, \
+        f"跨午夜品种必须全部 False，实际 {unsupported}"
+    # 全部 31 品种标志显式登记（不许缺省）
+    assert len(supported) + len(unsupported) == len(config.CN_FUTURES_VARIETY) == 31
+
+
+def test_minute_series_gate_raises_for_unsupported():
+    """未置位品种调用分钟序列直接 raise（不联网——闸在入口先于任何请求）。"""
+    import pytest as _pytest
+    from core.data_fetcher import DataFetcher
+    f = DataFetcher()
+    with _pytest.raises(ValueError, match="minute_series_supported"):
+        f.build_dominant_series_minute(["SC2509", "SC2510"], "2025-01-01",
+                                       "2025-06-30", period="60min", variety="SC")
+
+
+def test_minute_series_gate_passes_for_supported():
+    """支持品种（RB）通过边界闸且不误拦：monkeypatch 取数抛网络 stub——
+    若闸误拦会先报 minute_series_supported ValueError，报 network-stub 即闸放行。"""
+    import pytest as _pytest
+    import unittest.mock as mock
+    from core.data_fetcher import DataFetcher
+    f = DataFetcher()
+    with mock.patch.object(f, "_request", side_effect=RuntimeError("network-stub")):
+        with _pytest.raises(RuntimeError, match="network-stub"):
+            f.build_dominant_series_minute(["RB2510", "RB2601"], "2025-06-01",
+                                           "2025-09-30", period="60min", variety="RB")
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

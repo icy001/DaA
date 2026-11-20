@@ -2090,6 +2090,17 @@ class DataFetcher:
         引擎按 settle 缺失回退 close 盯市；raw_* 列仍是实际合约价（报单/保证金口径）。
         """
         period_num = str((config.PERIOD_TO_MINUTE or {}).get(period, period))
+        # 品种适用边界 fail-closed（v3.54 评审终验后补）：夜盘跨午夜品种（凌晨
+        # 01:00/02:30 收盘）的分钟 bar 交易日归属未处理，序列会静默污染——
+        # 边界由治理面白名单表达（CN_FUTURES_VARIETY.minute_series_supported），
+        # 不由注释表达；未置位品种分钟序列显式拒绝（日线序列不受此限）
+        variety = variety or re.sub(r"\d", "", str(contracts[-1])).upper()
+        spec = config.CN_FUTURES_VARIETY.get(variety) or {}
+        if not spec.get("minute_series_supported"):
+            raise ValueError(
+                f"品种 {variety} 未开启分钟序列支持（minute_series_supported 未置位）："
+                "夜盘跨午夜品种的 bar 归属未处理，禁止生成会静默污染的分钟序列；"
+                "支持边界见 config.CN_FUTURES_VARIETY（当前仅 23:00 前收盘及无夜盘品种）")
         daily = self.build_dominant_series(contracts, start, end, variety=variety)
         frames = {}
         for c in contracts:
