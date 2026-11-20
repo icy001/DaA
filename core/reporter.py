@@ -75,7 +75,7 @@ PERF_FIELDS = ("total_return", "annual_return", "max_drawdown", "sharpe",
 METRIC_LABELS = {
     "total_return": "总收益率", "annual_return": "年化收益", "max_drawdown": "最大回撤",
     "sharpe": "夏普比率", "sortino": "索提诺比率", "calmar": "卡玛比率",
-    "win_rate": "胜率", "profit_factor": "盈亏比", "trade_count": "交易笔数",
+    "win_rate": "胜率（平仓口径）", "profit_factor": "盈亏比", "trade_count": "交易笔数",
     "avg_holding_days": "平均持仓天数", "total_commission": "手续费合计",
     "benchmark_return": "基准收益", "excess_return": "超额收益",
     "information_ratio": "信息比率", "volatility": "波动率",
@@ -599,7 +599,7 @@ class Reporter:
             "trade_stats_rows": [
                 ("盈利笔数", str(stats["wins"])),
                 ("亏损笔数", str(stats["losses"])),
-                ("胜率（引擎口径）", _pct(metrics.get("win_rate"))),
+                ("胜率（平仓口径）", _pct(metrics.get("win_rate"))),
                 ("平均盈利", _signed(stats["avg_win"])),
                 ("平均亏损", _signed(stats["avg_loss"])),
                 ("盈亏比（引擎口径）", _num(metrics.get("profit_factor"))),

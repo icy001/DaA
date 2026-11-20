@@ -77,7 +77,7 @@ def print_metrics(metrics: dict) -> None:
     print(f"  年化收益   {metrics.get('annual_return', 0):+.2%}")
     print(f"  夏普       {metrics.get('sharpe', 0):.3f}")
     print(f"  最大回撤   {metrics.get('max_drawdown', 0):.2%}")
-    print(f"  胜率       {metrics.get('win_rate', 0):.2%}")
+    print(f"  胜率（平仓口径） {metrics.get('win_rate', 0):.2%}")
     print(f"  成交笔数   {metrics.get('trade_count', 0)}")
 
 

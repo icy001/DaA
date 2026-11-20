@@ -106,6 +106,23 @@ def test_win_rate_metrics_matches_detail_basis():
 
 # ==================== B-1 熔断自动恢复 ====================
 
+# v3.53 收尾①（评审裁定）：新增特性测试必须锚定具体版本号——>=语义仅限
+# 兼容性断言；特性锚定后，未来版本删键/改口径时此处会报错提醒同步更新，
+# 防止冻结静默失效。
+V3_53 = "v3.53"
+
+
+def test_v53_feature_keys_anchored_to_spec_version():
+    """13.0.24 特性冻结位：熔断恢复参数必须仍在 config.RISK 治理面内，
+    且锚定 >=v3.53——版本滚动删键/挪块时本测试必须失败并提示重审。"""
+    import config
+    assert config.SPEC_VERSION >= V3_53
+    acc = config.RISK["account"]
+    assert acc["halt_recover_stabilize_days"] == 3
+    assert acc["halt_recover_enabled"] is True
+    assert "13.0.24" in config.SPEC_VERSION_CHECK["must_contain_markers"]
+
+
 class _StubAccount:
     """最小账户桩：calc_equity 返回注入值，持仓为空（无黑天鹅/止损动作）。"""
 
