@@ -21,7 +21,7 @@ import config  # noqa: F401 - 供子模块与测试经 main 访问统一配置�
 from core import cli_gate
 from core.utils import MARKET_NAMES
 
-VERSION = "v3.17"
+VERSION = config.SPEC_VERSION  # 版本号单一事实来源 = 治理块，禁止在此硬编码（曾脱节到 v3.17）
 VERSION_DESC = "全市场+合格投资者层+行情K线+因子研究+一键入口（控制平面）"
 
 # 命令模块（顺序即 --help 显示顺序）；每个模块提供 add_subparser(sp) / handler(args)
