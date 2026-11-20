@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date as _date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -161,7 +162,8 @@ def test_halt_triggers_at_drawdown_then_recovers_after_stabilize():
     rm = _make_risk(halt_recover_stabilize_days=3)
     _run_day(rm, "2022-02-23", 100.0)          # 峰值 100
     _run_day(rm, "2022-02-24", 89.0)           # 回撤 -11% → 熔断
-    assert rm.halted is True and rm.halt_since == "2022-02-24"
+    assert rm.halted is True
+    assert rm.halt_since == _date(2022, 2, 24)   # v3.53：分钟级换日按日期部分归一
     # 观察期：首日仅记基准，此后连续 3 日未创新低
     _run_day(rm, "2022-02-25", 89.0)           # 首观察日，stabilize=0
     _run_day(rm, "2022-02-28", 89.0)           # 企稳 1

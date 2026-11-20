@@ -19,7 +19,11 @@ def _add_local_data_args(p) -> None:
                    help=_LOCAL_DATA_HELP)
 
 def cmd_backtest(args) -> int:
-    from core.runner import run_backtest
+    # D-1（v3.53 扩围前置）：CLI 必须走正式撮合引擎 Backtester——此前走
+    # StrategyRunner 轻量执行器（同根收盘价成交、滑点/量限/涨跌停/
+    # LookaheadError 断言全部未生效），与冻结配置
+    # EXECUTION_MODEL.match_price_basis=next_open 冲突。
+    from core.backtester import Backtester
     from core.strategy_loader import get
 
     params, symbols, start, end = _resolve_run_args(args)
@@ -27,11 +31,12 @@ def cmd_backtest(args) -> int:
     if not symbols:
         print("错误：未提供 symbols（命令行 --symbols 或 yaml 中 symbols）")
         return 2
-    result = run_backtest(get(args.strategy), params=params, symbols=symbols,
-                          start=start, end=end,
-                          initial_cash=getattr(args, "initial_cash", None),
-                          fetcher=fetcher,
-                          adjust=getattr(args, "adjust", None) or DEF("adjust"))
+    bt = Backtester(get(args.strategy), strategy_params=params, symbols=symbols,
+                    start_date=start, end_date=end,
+                    initial_capital=getattr(args, "initial_cash", None),
+                    fetcher=fetcher, adjust=getattr(args, "adjust", None) or DEF("adjust"),
+                    period=getattr(args, "period", None) or "1d")
+    result = bt.run().to_cli_dict()
     print_metrics(result["metrics"])
     if result["rejected"]:
         print(f"\n拒单 {len(result['rejected'])} 笔（前 5 条）：")
@@ -57,7 +62,8 @@ def _dump_backtest_artifacts(args, result, symbols, start, end) -> None:
     nav = result.get("nav")
     out_dir = Path(config.BASE_DIR) / "backtest_results"
     out_dir.mkdir(parents=True, exist_ok=True)
-    run_id = (f"bt_{args.strategy}_{start}_{end}_"
+    period = str(getattr(args, "period", None) or result.get("meta", {}).get("period") or "1d")
+    run_id = (f"bt_{args.strategy}_{period}_{start}_{end}_"
               f"{_dt.now():%Y%m%d_%H%M%S}")
     try:
         with open(out_dir / f"{run_id}_trades.csv", "w", newline="",
@@ -79,6 +85,7 @@ def _dump_backtest_artifacts(args, result, symbols, start, end) -> None:
             "surface_sha256": surface,
             "strategy": args.strategy,
             "symbols": list(symbols),
+            "period": period,
             "start": str(start), "end": str(end),
             "adjust": getattr(args, "adjust", None),
             "initial_cash": getattr(args, "initial_cash", None),
@@ -213,6 +220,8 @@ def add_subparser(sp) -> None:
     p.add_argument("--strategy", required=True, help="策略名（list-strategies 查看）")
     p.add_argument("--symbols", help="逗号分隔标的（缺省读 yaml）")
     p.add_argument("--params", help="策略参数 k=v,k=v（覆盖 yaml）")
+    p.add_argument("--period", default="1d",
+                   help="行情周期（1d/5min/15min/30min/60min 等 config.SUPPORTED_PERIODS；默认 1d）")
     _add_local_data_args(p)
     p.add_argument("--adjust", default=DEF("adjust"))
     p.add_argument("--initial-cash", dest="initial_cash", type=float,

@@ -72,12 +72,18 @@ def _resolve_run_args(args) -> tuple:
 
 
 def print_metrics(metrics: dict) -> None:
+    def _f(key, fmt):
+        v = metrics.get(key)
+        try:
+            return format(float(v), fmt)
+        except (TypeError, ValueError):
+            return "—"   # 样本不足等场景指标可为 None，展示占位不崩
     print("\n绩效：")
-    print(f"  总收益     {metrics.get('total_return', 0):+.2%}")
-    print(f"  年化收益   {metrics.get('annual_return', 0):+.2%}")
-    print(f"  夏普       {metrics.get('sharpe', 0):.3f}")
-    print(f"  最大回撤   {metrics.get('max_drawdown', 0):.2%}")
-    print(f"  胜率（平仓口径） {metrics.get('win_rate', 0):.2%}")
+    print(f"  总收益     {_f('total_return', '+.2%')}")
+    print(f"  年化收益   {_f('annual_return', '+.2%')}")
+    print(f"  夏普       {_f('sharpe', '.3f')}")
+    print(f"  最大回撤   {_f('max_drawdown', '.2%')}")
+    print(f"  胜率（平仓口径） {_f('win_rate', '.2%')}")
     print(f"  成交笔数   {metrics.get('trade_count', 0)}")
 
 

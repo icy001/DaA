@@ -122,6 +122,29 @@ class BacktestResult:
         self.traps = traps
         self.benchmark = benchmark if benchmark is not None else pd.DataFrame()
         self.meta = dict(meta or {})
+        # v3.53 扩围前置（D-1）：拒单与熔断状态随正式引擎结果落盘
+        self.rejected: List[dict] = []
+        self.halt_state: dict = {}
+        self.run_mode: str = "backtest"
+        self.symbols: List[str] = []
+        self.params: dict = {}
+
+    def to_cli_dict(self) -> dict:
+        """CLI 留痕/打印所需的 dict 形态（与 core/runner.StrategyRunner._result 键兼容）。"""
+        nav = self.nav
+        trades = self.trades.to_dict("records") if isinstance(self.trades, pd.DataFrame) \
+            else list(self.trades or [])
+        return {
+            "strategy": self.strategy_name,
+            "run_mode": self.run_mode,
+            "symbols": list(self.symbols),
+            "params": dict(self.params),
+            "nav": nav,
+            "metrics": dict(self.metrics),
+            "trades": trades,
+            "rejected": list(self.rejected),
+            "halt_state": dict(self.halt_state or {}),
+        }
 
     def to_dict(self) -> dict:
         return {"strategy": self.strategy_name, "metrics": self.metrics,
@@ -183,7 +206,8 @@ class Backtester:
                  slippage: float = None, max_volume_pct: float = None,
                  run_mode: str = "backtest", adjust: str = "qfq",
                  logger: logging.Logger = None, output_dir=None,
-                 liquidate_at_end: bool = True, universe: str = None):
+                 liquidate_at_end: bool = True, universe: str = None,
+                 period: str = "1d"):
         if not isinstance(strategy_class, type) or not issubclass(strategy_class, BaseStrategy):
             raise TypeError("strategy_class 必须是 BaseStrategy 的子类")
         self.strategy_class = strategy_class
@@ -202,6 +226,14 @@ class Backtester:
         self.market_type = market_type
         self.run_mode = str(run_mode)
         self.adjust = str(adjust or "qfq")
+        # v3.53 扩围：行情周期（config.SUPPORTED_PERIODS 8 种取值；"1d" 行为不变）
+        self.period = str(period or "1d")
+        # 分钟级量限分母：{symbol: 最近已完结交易日的全天成交量}（防「单分钟 1%」
+        # 过度宽松；日线不启用，行为与既有验收一致）
+        self._intraday = self.period != "1d"
+        self._day_volume_hist: Dict[str, pd.Series] = {}
+        self._day_volume_base: Dict[str, float] = {}
+        self._current_day = None
         self.logger = logger or setup_logger("backtester", config.LOG_DIR / "backtester.log")
         self.output_dir = Path(output_dir or config.BACKTEST_DIR)
         self.liquidate_at_end = bool(liquidate_at_end)
@@ -238,6 +270,15 @@ class Backtester:
         market = self.market_of.get(symbol)
         if market:
             kwargs["market_type"] = market
+        if self._intraday:
+            # 分钟线：按 config.SUPPORTED_PERIODS 周期取数（历史回填/当日源路由
+            # 由数据层 get_kline 决定，引擎不重复实现）
+            kwargs["period"] = self.period
+            try:
+                return self.fetcher.get_kline(symbol, **kwargs)
+            except TypeError:
+                kwargs.pop("market_type", None)
+                return self.fetcher.get_kline(symbol, **kwargs)
         try:
             return self.fetcher.get_daily(symbol, **kwargs)
         except TypeError:
@@ -288,6 +329,12 @@ class Backtester:
         # 对齐交易日交集；三个物化列逐标的保留
         self.frames = signal_gate.align_frames(raw, how="intersection")
         self.dates = sorted({d for frame in self.frames.values() for d in frame.index})
+        if self._intraday:
+            # 分钟级量限分母预计算：每 symbol 按日聚合全天成交量
+            # （撮合时用「最近已完结交易日」的全天量，无未来函数）
+            for symbol, frame in self.frames.items():
+                vol = pd.to_numeric(frame.get("volume"), errors="coerce").fillna(0.0)
+                self._day_volume_hist[symbol] = vol.groupby(vol.index.date).sum()
         self._warn_liquidity()
         self.benchmark_frame = self._fetch_benchmark()
         return self.frames
@@ -376,7 +423,22 @@ class Backtester:
             bars = signal_gate.build_bar_dict(rows, seen, strategy.warmup_bars, date)
             self.last_bar_dict = bars
 
-            self.execution.set_context(bars, self._prev_close, bar_index=bar_index)
+            # 分钟级量限分母：换日时更新为「最近已完结交易日」的全天成交量
+            # （当日量在 bar 开始时不可知，用昨日全天量 = 无未来函数；
+            #   日线不启用——日线 bar 的 volume 即当日全天量，行为不变）
+            if self._intraday:
+                d = pd.Timestamp(date).date()
+                if d != self._current_day:
+                    self._current_day = d
+                    base = {}
+                    for sym, hist in self._day_volume_hist.items():
+                        prior = hist[hist.index < d]
+                        if len(prior) and float(prior.iloc[-1]) > 0:
+                            base[sym] = float(prior.iloc[-1])
+                    self._day_volume_base = base
+            self.execution.set_context(bars, self._prev_close, bar_index=bar_index,
+                                       day_volume_base=(self._day_volume_base
+                                                        if self._intraday else None))
             # 0：先撮合上一根 bar 排队的订单（决策 bar#t → 成交 bar#t+1）
             self._fill_pending_orders(date)
             # 1-4：策略出信号 → 成交模型撮合（same_* 时同根，next_* 时入队）
@@ -505,8 +567,16 @@ class Backtester:
                                       "start": self.start_date, "end": self.end_date,
                                       "params": dict(strategy.params),
                                       "min_bars": self.min_bars,
+                                      "period": self.period,
                                       "slippage": self.execution.slippage})
         result.traps = self.detect_traps(result)
+        # D-1：拒单与熔断状态随正式引擎结果落盘（CLI 留痕/验收对账同源）
+        result.rejected = list(getattr(self.account, "rejected_orders", []) or [])
+        result.halt_state = (strategy.risk_manager.halt_state()
+                             if getattr(strategy, "risk_manager", None) else {})
+        result.run_mode = self.run_mode
+        result.symbols = list(self.symbols)
+        result.params = dict(strategy.params)
         return result
 
     def _benchmark_nav(self, nav: pd.DataFrame) -> pd.DataFrame:

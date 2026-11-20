@@ -153,6 +153,7 @@ class ExecutionModel:
         self.logger = logger or setup_logger("execution", config.LOG_DIR / "execution.log")
         self.bars: Dict[str, dict] = {}
         self.prev_close: Dict[str, float] = {}
+        self._day_volume_base: Dict[str, float] = {}
         self.bar_index = None
         self.capped_orders = 0
         self.limit_rejects = 0
@@ -171,10 +172,14 @@ class ExecutionModel:
 
     # -- 上下文 --
     def set_context(self, bars: Dict[str, dict], prev_close: Dict[str, float],
-                    bar_index: int = None) -> None:
+                    bar_index: int = None, day_volume_base: Dict[str, float] = None) -> None:
         self.bars = dict(bars or {})
         self.prev_close = dict(prev_close or {})
         self.bar_index = bar_index
+        # 分钟级量限分母（v3.53 扩围裁定）：{symbol: 最近已完结交易日全天成交量}。
+        # 语义 = 「全天累计成交量不超过 X%」，用昨日全天量作分母（当日量在 bar
+        # 开始时不可知）。None/缺 symbol 时回退当前 bar 的 volume（日线行为）。
+        self._day_volume_base = dict(day_volume_base or {})
 
     # -- 未来函数 --
     def assert_fill_bar(self, signal_bar_index) -> None:
@@ -250,7 +255,10 @@ class ExecutionModel:
 
         # ---- 成交量上限：按市场分档（None 表示不设限）----
         volume = float(volume)
-        day_volume = float(bar.get("volume") or 0)
+        # 分钟级分母 = 最近已完结交易日全天量（「全天累计不超 X%」，防单分钟
+        # 1% 过度宽松）；日线/未提供时 = 当前 bar volume（bar 即全天，行为不变）
+        day_volume = float(self._day_volume_base.get(str(symbol))
+                           or bar.get("volume") or 0)
         capped = False
         pct_cap = self.volume_pct_for(market)
         if pct_cap is not None and day_volume > 0:

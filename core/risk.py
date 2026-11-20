@@ -22,7 +22,11 @@
 from __future__ import annotations
 
 import logging
+from datetime import date as _date
+from datetime import datetime
 from typing import Dict, List, Optional
+
+import pandas as pd
 
 import config
 
@@ -107,8 +111,11 @@ class RiskManager:
         prices = {str(s): float(p) for s, p in dict(prices or {}).items()
                   if p is not None and float(p) > 0}
         equity = float(self.account.calc_equity(prices))
-        if self._day != date:
-            self._day = date
+        # 换日判定按「日期部分」比较：分钟线下 date 是 timestamp，直接比较
+        # 会让日初权益每根 bar 都被重置（日内亏损上限失效）（v3.53 扩围修复）
+        day = self._as_day(date)
+        if self._day != day:
+            self._day = day
             self._day_start_equity = equity
         self._peak_equity = max(self._peak_equity or equity, equity)
         self._update_halt(equity)
@@ -117,6 +124,23 @@ class RiskManager:
         actions.extend(self._stop_loss_actions(prices))
         self._prev_prices = dict(prices)
         return actions
+
+    @staticmethod
+    def _as_day(date):
+        """任意日期输入 → date（datetime/Timestamp 取日期部分）。
+
+        无法解析的合成标签（测试用 "d1" 等）原样返回，保持旧「相等比较」
+        行为；真实行情输入（Timestamp/datetime/str-date）一律归一为 date，
+        保证分钟级换日判定按日期部分比较。
+        """
+        if date is None:
+            return None
+        if isinstance(date, _date) and not isinstance(date, datetime):
+            return date
+        try:
+            return pd.Timestamp(date).date()
+        except (ValueError, TypeError):
+            return date
 
     def _update_halt(self, equity: float) -> None:
         if self.halted:
