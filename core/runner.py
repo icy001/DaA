@@ -147,6 +147,9 @@ class StrategyRunner:
     def _result(self, strategy: BaseStrategy) -> dict:
         nav = strategy.equity_curve
         metrics = calc_metrics(nav, self.account.trades)
+        # 熔断状态随 result 落盘（B-1 裁定：禁止静默复位，回测报告必须携带）
+        halt_state = (strategy.risk_manager.halt_state()
+                      if getattr(strategy, "risk_manager", None) else None)
         return {
             "strategy": strategy,
             "run_mode": self.run_mode,
@@ -156,6 +159,7 @@ class StrategyRunner:
             "metrics": metrics,
             "trades": list(strategy.orders),
             "rejected": list(strategy.rejected_orders),
+            "halt_state": halt_state,
         }
 
 
@@ -188,8 +192,13 @@ def calc_metrics(nav: pd.Series, trades: list = None,
 
 
 def _win_rate(trades: list) -> float:
-    pnls = [float(t.get("realized_pnl", 0) or 0) for t in trades
-            if t.get("status") == "filled" and "realized_pnl" in t]
+    # v3.52 回测验收修正（C-1 二次根因）：输入是 account.trades（_trade_record
+    # 无 status 字段、盈亏字段名 pnl）或 strategy.orders（status=filled、字段名
+    # realized_pnl）。以落盘 pnl 为准、realized_pnl 兼容别名；status 缺省按
+    # filled（account.trades 本身就是成交账本，带 status 的记录仍须 = filled）
+    pnls = [float(t.get("pnl", t.get("realized_pnl", 0)) or 0) for t in trades
+            if t.get("status", "filled") == "filled"
+            and ("pnl" in t or "realized_pnl" in t)]
     if not pnls:
         return 0.0
     return float(sum(1 for p in pnls if p > 0) / len(pnls))

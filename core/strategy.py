@@ -206,6 +206,20 @@ class BaseStrategy:
                price: float = None, **kwargs) -> dict:
         symbol = str(symbol).strip()
         action = "open" if direction in ("buy", "short") else "close"
+        strength = kwargs.get("signal_strength")   # 可选：策略侧信号强度（无则 None）
+        warmup_ok = self._warmup_ok.get(symbol, False)
+        px = price if price is not None else self._prices.get(symbol)  # 提前解析：_emit 闭包引用
+
+        def _emit(rec: dict, reason_code: str) -> None:
+            """C-3：信号出口唯一结构化日志——每条信号恰好一条，可事后对账
+            （信号总数 = [SIGNAL] 日志数；rejected 记录命中闸门与原因）。"""
+            self.logger.info(
+                "[SIGNAL] date=%s symbol=%s direction=%s strength=%s vol=%g px=%s "
+                "warmup_ok=%s stage=%s status=%s reason=%s reject_id=%s code=%s",
+                self._current_date, symbol, direction, strength,
+                float(volume), px, warmup_ok, rec.get("stage", ""),
+                rec.get("status", ""), rec.get("reason", ""),
+                rec.get("reject_id", ""), reason_code)
 
         # ---- 闸门 1：指标预热（开仓严、平仓宽；实现见 core/signal_gate.py）----
         rejection = signal_gate.check_order(
@@ -217,6 +231,7 @@ class BaseStrategy:
                 symbol, direction, False, reason=rejection.get("reason", ""),
                 reason_code="warmup", source="strategy",
                 reject_id=rejection["reject_id"])
+            _emit(rejection, "warmup")
             return rejection
 
         # ---- 闸门 2：黑名单（退市/停牌/ST/风险警示）----
@@ -231,6 +246,7 @@ class BaseStrategy:
                 symbol, direction, False, reason=reason,
                 reason_code=signal_gate.classify_rejection(reason),
                 source="strategy", reject_id=rec["reject_id"])
+            _emit(rec, "blacklist")
             return rec
 
         # ---- 风控 3：单标的上限 / 总杠杆（只拦开仓）----
@@ -246,11 +262,12 @@ class BaseStrategy:
                     symbol, direction, False, reason=limit_reason,
                     reason_code="risk_block", source="strategy",
                     reject_id=rec["reject_id"])
+                _emit(rec, "risk_block")
                 return rec
 
-        px = price if price is not None else self._prices.get(symbol)
+        px2 = price if price is not None else self._prices.get(symbol)
         result = self.account.place_order(
-            symbol, direction, "market", float(volume), px,
+            symbol, direction, "market", float(volume), px2,
             order_time=self._current_date,
             market_type=kwargs.pop("market_type", None),
             data=kwargs.pop("data", None),
@@ -266,6 +283,7 @@ class BaseStrategy:
         self.orders.append(result)
         if result.get("status") != "filled":
             self.rejected_orders.append(result)
+        _emit(result, str(result.get("code", "account")))
         return result
 
     # ==================== 查询 ====================

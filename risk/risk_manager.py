@@ -45,8 +45,8 @@ class LiveRiskManager(RiskManager):
     """账户级 / 订单级 / 合规级三层实盘风控。"""
 
     def __init__(self, account, params: dict = None, logger=None,
-                 now_fn: Callable[[], float] = None) -> None:
-        super().__init__(account, params=params, logger=logger)
+                 now_fn: Callable[[], float] = None, state_file=None) -> None:
+        super().__init__(account, params=params, logger=logger, state_file=state_file)
         raw = dict(getattr(config, "RISK", {}) or {})
         self.account_cfg = dict(raw.get("account") or {})
         self.order_cfg = dict(raw.get("order") or {})

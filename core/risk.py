@@ -45,13 +45,34 @@ def kind_of_market(market: str) -> str:
 
 
 class RiskManager:
-    """三引擎共用的风控裁决器。"""
+    """三引擎共用的风控裁决器。
 
-    def __init__(self, account, params: dict = None, logger: logging.Logger = None):
+    v3.52 回测验收裁定（B-1）：熔断的目的是「暂停开仓等待风险释放」，
+    不是永久锁死。触发条件不变；恢复走两条路：
+    ① 连续 ``halt_recover_stabilize_days``（默认 3）个交易日权益未再创新低
+       （企稳）自动解除，并以解除日权益为新的回撤峰值基准（旧峰值不清除
+       会导致「解除当天即再熔断」的死锁，即 2022-02-25 起 175 笔连续拒单
+       4.7 年的根因）；
+    ② 人工复位：实盘 CLI ``risk-reset --confirm yes``（二次确认），回测走自动恢复。
+    熔断状态（是否熔断/起始日/企稳天数）必须随回测 result 与实盘状态文件落盘，
+    禁止静默复位。
+    """
+
+    def __init__(self, account, params: dict = None, logger: logging.Logger = None,
+                 state_file=None):
         base = risk_config()
         params = dict(params or {})
         self.account = account
         self.logger = logger or getattr(account, "logger", None) or logging.getLogger("risk")
+        # 熔断自动恢复参数：模块默认 3 日企稳（config.RISK 未登记该键，新增键
+        # 会改变 cs-v1 配置面，须走版本流程；params 显式覆盖优先）
+        self.halt_recover_stabilize_days = int(params.get(
+            "halt_recover_stabilize_days",
+            base.get("halt_recover_stabilize_days", 3)))
+        self.halt_recover_enabled = bool(params.get(
+            "halt_recover_enabled", base.get("halt_recover_enabled", True)))
+        # 实盘状态文件（可选）：回测 None（状态随 result 落盘），实盘传路径跨进程同步
+        self.state_file = state_file
 
         self.max_single_symbol_pct = float(params.get(
             "max_single_symbol_pct", base.get("max_single_symbol_pct", 0.20)))
@@ -75,6 +96,9 @@ class RiskManager:
         self._prev_prices: Dict[str, float] = {}
         self.halted = False
         self.halt_reason = ""
+        self.halt_since = None          # 熔断起始日（随 halt_state 落盘）
+        self._stabilize_days = 0        # 熔断观察期：连续企稳天数
+        self._prev_equity: Optional[float] = None  # 企稳判定的上一日权益基准
 
     # ==================== 权益与熔断 ====================
 
@@ -96,6 +120,9 @@ class RiskManager:
 
     def _update_halt(self, equity: float) -> None:
         if self.halted:
+            # 熔断观察期：不再立即重判（旧逻辑每日复位→每日重熔 = 死锁），
+            # 改为观察权益是否企稳，连续 N 日未创新低自动解除
+            self._observe_recovery(equity)
             return
         if self._day_start_equity and self._day_start_equity > 0:
             loss = equity / self._day_start_equity - 1.0
@@ -108,23 +135,107 @@ class RiskManager:
                 self._halt(f"权益回撤 {drawdown:.2%} 触及熔断线 "
                            f"{self.max_drawdown_pct_stop:.2%}，停止开仓")
 
+    def _observe_recovery(self, equity: float) -> None:
+        """熔断观察期：连续 N 个交易日权益未再创新低（企稳）→ 自动解除。
+
+        解除时把回撤峰值基准重置为当前权益——不清基准会在解除当天被旧峰值
+        再次熔断（B-1 死锁根源）。逐日更新企稳计数，创新低即归零。
+        """
+        if not self.halt_recover_enabled:
+            return
+        if self._prev_equity is None or self._prev_equity <= 0:
+            self._prev_equity = float(equity)
+            self._write_state_file()
+            return
+        if float(equity) >= self._prev_equity:
+            self._stabilize_days += 1
+        else:
+            self._stabilize_days = 0
+        self._prev_equity = float(equity)
+        if self._stabilize_days >= self.halt_recover_stabilize_days:
+            reason = self.halt_reason
+            self.reset_halt()
+            self._peak_equity = float(equity)   # 解除日权益为新回撤基准
+            self.logger.warning(
+                "风控熔断自动恢复：连续 %d 个交易日权益企稳（未创新低），解除熔断"
+                "（原因：%s），回撤基准重置为 %.2f，恢复开仓",
+                self.halt_recover_stabilize_days, reason, equity)
+        else:
+            self._write_state_file()
+
     def _halt(self, reason: str) -> None:
         self.halted = True
         self.halt_reason = reason
+        self.halt_since = self._day
+        self._stabilize_days = 0
+        self._prev_equity = None   # 观察期从次日开始比较
         self.logger.warning("风控熔断：%s", reason)
+        self._write_state_file()
 
-    def reset_halt(self) -> None:
-        """换日/人工复位后允许重新开仓（回测结束/新交易日由引擎决定是否调用）。"""
+    def reset_halt(self, manual: bool = False) -> None:
+        """解除熔断。manual=True 为人工复位（CLI risk-reset，需二次确认），打审计日志。"""
         self.halted = False
         self.halt_reason = ""
+        self.halt_since = None
+        self._stabilize_days = 0
+        self._prev_equity = None
+        if manual:
+            self.logger.warning("风控熔断人工复位：由操作者经 CLI 显式解除（需二次确认），恢复开仓")
+        self._write_state_file()
+
+    def halt_state(self) -> dict:
+        """熔断状态快照（禁止静默复位：随回测 result / 实盘状态文件落盘）。"""
+        return {
+            "halted": bool(self.halted),
+            "halt_reason": self.halt_reason,
+            "halt_since": str(self.halt_since) if self.halt_since is not None else None,
+            "stabilize_days": int(self._stabilize_days),
+            "recover_stabilize_days": int(self.halt_recover_stabilize_days),
+            "recover_enabled": bool(self.halt_recover_enabled),
+        }
+
+    def _write_state_file(self) -> None:
+        """实盘状态文件（可选）：halt/恢复/复位时落盘，跨进程（CLI risk-reset）可读。"""
+        if not self.state_file:
+            return
+        try:
+            from pathlib import Path
+            import json
+            path = Path(self.state_file)
+            if not path.is_absolute():
+                path = config.BASE_DIR / path
+            if self.halted:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(self.halt_state(), ensure_ascii=False),
+                                encoding="utf-8")
+            elif path.exists():
+                path.unlink()   # 解除即删标志文件（CLI 复位协议：文件不存在=未熔断）
+        except OSError as exc:
+            self.logger.warning("熔断状态文件写入失败 %s: %s", self.state_file, exc)
+
+    def sync_state_file(self) -> None:
+        """实盘换日时同步：状态文件被 CLI risk-reset 删除 → 内存熔断同步解除（人工复位生效点）。"""
+        if not self.state_file:
+            return
+        from pathlib import Path
+        path = Path(self.state_file)
+        if not path.is_absolute():
+            path = config.BASE_DIR / path
+        if self.halted and not path.exists():
+            self.reset_halt(manual=True)
 
     def new_day(self, date, equity: float = None, prices: Dict[str, float] = None) -> None:
-        """显式换日：重置日内亏损基准并解除前一日熔断（回撤熔断仍按峰值重算）。"""
+        """显式换日：重置日内亏损基准。
+
+        v3.52 裁定：不再无条件解除熔断（旧逻辑「每日复位→每日重熔」正是 B-1
+        死锁形态）。熔断解除只走两条路：①连续 N 日企稳自动恢复；②人工复位
+        （reset_halt(manual=True)）。实盘模式下先 sync_state_file() 让 CLI 复位生效。
+        """
+        self.sync_state_file()
         self._day = date
         if equity is None:
             equity = float(self.account.calc_equity(prices or {}))
         self._day_start_equity = float(equity)
-        self.reset_halt()
 
     # ==================== 开仓裁决 ====================
 

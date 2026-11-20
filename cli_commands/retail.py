@@ -37,7 +37,70 @@ def cmd_backtest(args) -> int:
         print(f"\n拒单 {len(result['rejected'])} 笔（前 5 条）：")
         for item in result["rejected"][:5]:
             print(f"  - {item.get('symbol')} {item.get('direction')}：{item.get('reason')}")
+    _dump_backtest_artifacts(args, result, symbols, start, end)
     return 0
+
+
+def _dump_backtest_artifacts(args, result, symbols, start, end) -> None:
+    """C-2：回测留痕三件自动落盘（backtest_results/），无落盘 = 不可复现 = 不可验收。
+
+    {run_id}_trades.csv  逐笔成交明细
+    {run_id}_equity.csv  每日权益
+    {run_id}_config.json 冻结配置（参数 / 版本 / 治理面哈希 / 区间 / 熔断状态）
+    """
+    import csv
+    import json
+    from datetime import datetime as _dt
+    from pathlib import Path
+
+    trades = result.get("trades") or []
+    nav = result.get("nav")
+    out_dir = Path(config.BASE_DIR) / "backtest_results"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run_id = (f"bt_{args.strategy}_{start}_{end}_"
+              f"{_dt.now():%Y%m%d_%H%M%S}")
+    try:
+        with open(out_dir / f"{run_id}_trades.csv", "w", newline="",
+                  encoding="utf-8-sig") as fh:
+            w = csv.writer(fh)
+            keys = sorted({k for t in trades for k in t})
+            w.writerow(keys)
+            for t in trades:
+                w.writerow([t.get(k, "") for k in keys])
+        if nav is not None and len(nav):
+            nav.to_csv(out_dir / f"{run_id}_equity.csv", encoding="utf-8-sig")
+        surface = ""
+        surface_file = Path(config.BASE_DIR) / "config_surface.sha256"
+        if surface_file.exists():
+            surface = surface_file.read_text(encoding="utf-8").split()[0]
+        snapshot = {
+            "run_id": run_id,
+            "spec_version": config.SPEC_VERSION,
+            "surface_sha256": surface,
+            "strategy": args.strategy,
+            "symbols": list(symbols),
+            "start": str(start), "end": str(end),
+            "adjust": getattr(args, "adjust", None),
+            "initial_cash": getattr(args, "initial_cash", None),
+            "run_mode": result.get("run_mode"),
+            "params": result.get("params"),
+            "halt_state": result.get("halt_state"),
+            "metrics": {k: (float(v) if hasattr(v, "__float__") else v)
+                        for k, v in (result.get("metrics") or {}).items()},
+            "execution": {
+                "match_price_basis": config.EXECUTION_MODEL["match_price_basis"],
+                "slippage_base_pct": config.EXECUTION_MODEL["slippage_base_pct"],
+                "slippage_multiplier": config.EXECUTION_MODEL["slippage_multiplier"],
+            },
+        }
+        (out_dir / f"{run_id}_config.json").write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8")
+        print(f"\n留痕三件已落盘：{out_dir}/{run_id}_{{trades.csv,equity.csv,config.json}}")
+        if result.get("halt_state"):
+            print(f"熔断状态：{json.dumps(result['halt_state'], ensure_ascii=False)}")
+    except OSError as exc:
+        print(f"[警告] 回测留痕落盘失败（不影响回测结果）：{exc}")
 
 
 def cmd_paper(args) -> int:
@@ -109,6 +172,41 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_risk_reset(args) -> int:
+    """B-1：实盘熔断人工复位（需 --confirm yes 二次确认）。
+
+    协议：熔断状态文件 live_trading/RISK_HALT.json 由运行中的实盘/模拟盘
+    RiskManager 落盘；本命令做二次确认后删除标志文件并写审计行，运行中进程
+    在下一次换日（new_day → sync_state_file）检测到文件消失即同步解除。
+    """
+    from pathlib import Path
+    if str(getattr(args, "confirm", "")) != "yes":
+        print("[拒绝] 人工复位熔断需二次确认：追加 --confirm yes 后重试")
+        return 2
+    flag = Path(config.BASE_DIR) / "live_trading" / "RISK_HALT.json"
+    if not flag.exists():
+        print("当前无熔断状态文件（未熔断），无需复位")
+        return 0
+    import json as _json
+    from datetime import datetime as _dt
+    try:
+        state = _json.loads(flag.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    flag.unlink()
+    audit = flag.parent / "RISK_HALT_RESETS.log"
+    line = (f"{_dt.now():%Y-%m-%d %H:%M:%S} manual_reset by={getattr(args, 'operator', 'unknown')} "
+            f"halted_since={state.get('halt_since')} reason={state.get('halt_reason')}\n")
+    try:
+        with open(audit, "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except OSError as exc:
+        print(f"[警告] 审计行写入失败：{exc}")
+    print(f"熔断已人工复位：原状态 {state.get('halt_since')} 起「{state.get('halt_reason', '')}」；"
+          f"运行中进程将在下一次换日同步解除。审计：{audit.name}")
+    return 0
+
+
 def add_subparser(sp) -> None:
     """注册零售层四件套（回测 / 模拟盘 / 盯盘 / 报告）。"""
     p = sp.add_parser("backtest", help=f"[{GROUP}] 策略回测")
@@ -137,6 +235,11 @@ def add_subparser(sp) -> None:
 
     p = sp.add_parser("monitor", help=f"[{GROUP}] 定时盯盘与消息推送")
     p.set_defaults(handler=cmd_monitor)
+
+    p = sp.add_parser("risk-reset", help=f"[{GROUP}] 风控熔断人工复位（需二次确认）")
+    p.add_argument("--confirm", help="二次确认：必须显式传 yes")
+    p.add_argument("--operator", help="操作人（写入审计行）")
+    p.set_defaults(handler=cmd_risk_reset)
 
     p = sp.add_parser("report", help=f"[{GROUP}] 复盘报告（日/周/月）")
     p.add_argument("--strategy", required=True, help="与模拟盘同名的策略")

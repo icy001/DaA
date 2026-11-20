@@ -69,7 +69,9 @@ class LiveTrader:
         self.account = account or TradingAccount(run_mode=self.mode, fetcher=fetcher,
                                                  logger=self.logger)
         self.fetcher = fetcher
-        self.risk = LiveRiskManager(self.account, params=risk_params, logger=self.logger)
+        # B-1：实盘熔断状态落盘（跨进程：CLI risk-reset 删标志文件 → 换日同步解除）
+        self.risk = LiveRiskManager(self.account, params=risk_params, logger=self.logger,
+                                    state_file="live_trading/RISK_HALT.json")
         self.qi_verified = bool(qi_verified)
         self.store = store or IdempotencyStore()
         self.kill_switch = kill_switch or KillSwitch()
