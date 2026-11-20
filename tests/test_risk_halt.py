@@ -124,6 +124,23 @@ def test_v53_feature_keys_anchored_to_spec_version():
     assert "13.0.24" in config.SPEC_VERSION_CHECK["must_contain_markers"]
 
 
+def test_intraday_bars_do_not_reset_day_start_equity():
+    """v3.53 扩围修复回归：分钟线下 date 是 timestamp，换日判定必须按日期
+    部分归一——同日多根 bar 不得重置日初权益（日内亏损上限曾因此失效）。"""
+    import pandas as pd
+    rm = _make_risk(daily_loss_pct_stop=0.05)
+    d = pd.Timestamp("2026-01-05")
+    rm.on_bar(d + pd.Timedelta(minutes=210), {"X": 10.0})   # 10:30 首根：日初=100
+    assert rm._day_start_equity == pytest.approx(100.0)
+    rm.on_bar(d + pd.Timedelta(minutes=270), {"X": 10.0})   # 11:30 同日第二根
+    assert rm._day == _date(2026, 1, 5)
+    assert rm._day_start_equity == pytest.approx(100.0)     # 不得被重置
+    # 次日才重置日初
+    rm.on_bar(pd.Timestamp("2026-01-06 10:30"), {"X": 10.0})
+    assert rm._day == _date(2026, 1, 6)
+    assert rm._day_start_equity == pytest.approx(100.0)     # 新一日重新计
+
+
 class _StubAccount:
     """最小账户桩：calc_equity 返回注入值，持仓为空（无黑天鹅/止损动作）。"""
 
