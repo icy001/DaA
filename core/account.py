@@ -425,6 +425,38 @@ class TradingAccount:
                     for_trading: bool = False, data_kind: str = "daily",
                     period: str = "60", warmup_ok: bool = None,
                     fill_now: bool = False, signal_bar_index: int = None) -> dict:
+        """下单公开入口（壳）：【成交决策登记】+ 透传 _place_order_impl。
+
+        信号出口对账恒等式（v3.54 终验）：每笔信号在决策日志中恰好一条——
+        策略闸拦截记 False（strategy._order）、撮合层拒单记 False（_reject）、
+        成交记 True（本壳）；换月平开/强平走 _execute 直连（机制性成交，非信号
+        出口，不入对账）。禁止另建拦截计数导致报告与引擎不同源。
+        """
+        result = self._place_order_impl(
+            symbol=symbol, direction=direction, order_type=order_type,
+            volume=volume, price=price, order_time=order_time,
+            market_type=market_type, data=data, pre_close=pre_close,
+            underlying_price=underlying_price, hold_days=hold_days,
+            is_etf=is_etf, option_type=option_type, strike=strike, expiry=expiry,
+            for_trading=for_trading, data_kind=data_kind, period=period,
+            warmup_ok=warmup_ok, fill_now=fill_now,
+            signal_bar_index=signal_bar_index)
+        if str(result.get("status")) == "filled":
+            from core import signal_gate
+            signal_gate.record_decision(
+                symbol, direction, True, reason="filled", reason_code="",
+                source="place_order")
+        return result
+
+    def _place_order_impl(self, symbol: str, direction: str, order_type: str = "market",
+                          volume: float = 0.0, price: float = None, order_time=None,
+                          market_type: str = None, data: pd.DataFrame = None,
+                          pre_close: float = None, underlying_price: float = None,
+                          hold_days: int = None, is_etf: bool = None,
+                          option_type: str = None, strike: float = None, expiry=None,
+                          for_trading: bool = False, data_kind: str = "daily",
+                          period: str = "60", warmup_ok: bool = None,
+                          fill_now: bool = False, signal_bar_index: int = None) -> dict:
         """下单主入口，返回 {"status": "filled"/"pending"/"rejected", ...}。
 
         `fill_now=False` 且已注入 `deferred_executor` 时（match_price_basis=next_*），

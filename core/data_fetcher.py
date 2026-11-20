@@ -2077,6 +2077,99 @@ class DataFetcher:
                     and not pd.isna(merged.loc[day, (c, "close")]):
                 prev_close_of[c] = float(merged.loc[day, (c, "close")])
 
+    def build_dominant_series_minute(self, contracts, start, end, period="60min",
+                                     variety=None):
+        """自建主力连续【分钟双序列】（v3.54 终验：RB 2020~2026 60min 全期验证）。
+
+        换月事件复用日线口径（build_dominant_series 的「当时量交叉」判定），
+        分钟 bar 按所属交易日继承 contract/adj_factor（评审纪律：因子按日缓存、
+        分钟价按所属交易日折算——与股票分钟复权同款）；换月标记只落在换月日
+        【最后一根分钟 bar】（收盘确认量交叉 → 当日收盘机械平开一次，禁止日内
+        每根 bar 重复触发换月成交）。平旧腿价 = 旧合约当日最后一根分钟收盘。
+        settle 结算价分钟级不可得（新浪分钟无该字段）→ 不造列（禁止补 0/伪装），
+        引擎按 settle 缺失回退 close 盯市；raw_* 列仍是实际合约价（报单/保证金口径）。
+        """
+        period_num = str((config.PERIOD_TO_MINUTE or {}).get(period, period))
+        daily = self.build_dominant_series(contracts, start, end, variety=variety)
+        frames = {}
+        for c in contracts:
+            code = str(c).upper()
+            raw = self._request(ak.futures_zh_minute_sina, symbol=code,
+                                period=period_num, _source="sina_futures")
+            time.sleep(0.3)  # 批量取数限速（勿高频调用）
+            df = raw.copy()
+            df["datetime"] = pd.to_datetime(df["datetime"])
+            frames[code] = df.set_index("datetime").sort_index()
+        day_factor = daily["adj_factor"]
+        day_contract = daily["contract"]
+        day_roll = daily["roll"]
+        day_prev = daily["roll_prev_contract"]
+        # 按日线交易日循环：每个交易日只取【当日主力合约】的分钟 bar（重叠期
+        # 旧合约 bar 不得入序列——同窗口两条合约价 = 价格污染源）；交易日归属：
+        # 日盘（物理 03:00~20:00 当日）+ 前一交易日夜盘（物理 ≥20:00）。
+        # ⚠️ 限制声明：凌晨收盘品种（CU/AU/SC 夜盘至 01:00）的午夜后段归属未
+        # 处理，本方法当前适用于 23:00 前收盘品种（RB/HC 等），扩展需交易日历。
+        # 换月标记只落该交易日【最后一根】bar：量交叉以当日全天量判定，收盘后
+        # 才确认——日内任何 bar 提前标记 = 未来函数（首轮踩坑：首根 bar 被标，
+        # 等于用量交叉前的盘中数据做了收盘决策）。
+        dates = list(daily.index)
+        rows, idx = [], []
+        for i, d in enumerate(dates):
+            c = str(day_contract.loc[d])
+            f = float(day_factor.loc[d])
+            sub = frames.get(c)
+            if sub is None or not len(sub):
+                continue
+            night_phys = dates[i - 1] if i else None
+            day_part = sub[(sub.index.normalize() == d)
+                           & (sub.index.hour >= 3) & (sub.index.hour < 20)]
+            night_part = (sub[(sub.index.normalize() == night_phys)
+                              & (sub.index.hour >= 20)]
+                          if night_phys is not None else day_part.iloc[0:0])
+            bars = pd.concat([night_part, day_part]).sort_index()
+            if not len(bars):
+                continue
+            is_roll_day = bool(day_roll.loc[d])
+            last_pos = len(bars) - 1
+            old = day_prev.loc[d] if is_roll_day else None
+            old_bars = (frames.get(str(old)) if old and str(old) in frames else None)
+            old_day_bars = None
+            if old_bars is not None and len(old_bars):
+                ob_night = old_bars[(old_bars.index.normalize() == night_phys)
+                                    & (old_bars.index.hour >= 20)] \
+                    if night_phys is not None else old_bars.iloc[0:0]
+                ob_day = old_bars[(old_bars.index.normalize() == d)
+                                  & (old_bars.index.hour >= 3)
+                                  & (old_bars.index.hour < 20)]
+                old_day_bars = pd.concat([ob_night, ob_day]).sort_index()
+            for pos, (dt, row) in enumerate(bars.iterrows()):
+                raw_o, raw_h = float(row["open"]), float(row["high"])
+                raw_l, raw_c = float(row["low"]), float(row["close"])
+                is_roll = is_roll_day and pos == last_pos
+                rec = {
+                    "open": raw_o * f, "high": raw_h * f, "low": raw_l * f,
+                    "close": raw_c * f, "volume": float(row["volume"]),
+                    "raw_open": raw_o, "raw_high": raw_h, "raw_low": raw_l,
+                    "raw_close": raw_c, "adj_factor": f,
+                    "contract": c, "roll": is_roll,
+                }
+                if is_roll and old_day_bars is not None and len(old_day_bars):
+                    rec["roll_exit_price"] = float(old_day_bars["close"].iloc[-1])
+                    rec["roll_prev_contract"] = str(old)
+                rows.append(rec)
+                idx.append(dt)
+        out = pd.DataFrame(rows, index=pd.DatetimeIndex(idx))
+        out.attrs.update({
+            "market": "cn_future", "adjust": "none", "source": "self_built_dominant",
+            "roll_rule": "volume_cross_same_day_daily_basis",
+            "contracts": [str(c).upper() for c in contracts],
+            "period": period, "volume_unit": "手", "amount_missing": True,
+            "dual_price": True, "settle_minute_missing": True,
+            "basis_note": "主列=换月回溯调整连续分钟价（信号）；raw_*=实际合约价"
+                          "（保证金/报单）；settle 分钟级不可得→引擎回退 close 盯市",
+        })
+        return out
+
     def _fetch_intl_futures_daily(self, symbol, start, end, adjust):
         # ⚠️ 外盘期货同样只有 volume（单位=手），无成交额；禁止用 close×volume 估算成交额
         df = self._standardize(self._request(ak.futures_foreign_hist,

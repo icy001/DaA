@@ -165,8 +165,13 @@ class BacktestResult:
             f" | 卡玛 {_num(m.get('calmar'))}",
             f"交易 {m.get('trade_count')} 笔 | 胜率 {_pct(m.get('win_rate'))}"
             f" | 盈亏比 {_num(m.get('profit_factor'))} | 平均持仓 {_num(m.get('avg_holding_days'))} 天",
-            f"手续费合计 {_num(m.get('total_commission'))} | 保证金使用率(均) "
-            f"{_pct(m.get('avg_margin_utilization'))} | 爆仓次数 {m.get('margin_call_count')}",
+            # 期货口径披露（v3.54 终验裁定）：收益率分母=初始权益（与股票一致可横向
+            # 对比）；保证金占用率与名义敞口杠杆倍数单独披露，避免高杠杆下收益歧义
+            f"手续费合计 {_num(m.get('total_commission'))} | 保证金占用率 "
+            f"{_pct(m.get('avg_margin_utilization'))}（峰 {_pct(m.get('max_margin_utilization'))}）"
+            f" | 名义杠杆 {_num(m.get('avg_leverage'))}（峰 {_num(m.get('max_leverage'))}）"
+            f" | 爆仓次数 {m.get('margin_call_count')}",
+            "收益率分母 = 初始权益（INITIAL_CASH 口径，与股票回测一致可横向对比）",
         ]
         if self.traps:
             lines.append("陷阱提示：")
@@ -247,6 +252,13 @@ class Backtester:
         # 与策略含息记账同口径；禁止硬编码 000300 导致含息超额被系统性高估）
         self.benchmark = str(benchmark or config.BENCHMARK)
         self.market_type = market_type
+        # 期货基准规则（v3.54 终验裁定）：禁止跨资产混用——期货池永不套股票基准。
+        # 股指期货按 config.FUTURE_BENCHMARK_MAP 映射全收益指数（映射 None=仅绝对
+        # 收益）；商品期货基准置空，prepare 后自动构建「同品种连续合约 buy&hold」；
+        # 期货+非期货混合池直接 raise（基准口径不可混合，请分开回测）
+        self._explicit_benchmark = benchmark
+        self.future_benchmark_mode, self.benchmark = self._resolve_future_benchmark(
+            symbols, benchmark)
         self.run_mode = str(run_mode)
         self.adjust = str(adjust or "qfq")
         # v3.53 扩围：行情周期（config.SUPPORTED_PERIODS 8 种取值；"1d" 行为不变）
@@ -368,8 +380,86 @@ class Backtester:
         self.benchmark_frame = self._fetch_benchmark()
         return self.frames
 
+    # ---- 期货基准规则（v3.54 终验裁定：禁止跨资产混用） ----
+
+    @staticmethod
+    def _variety_of(symbol: str) -> str:
+        return "".join(c for c in str(symbol).upper() if c.isalpha())
+
+    def _resolve_future_benchmark(self, symbols, explicit_benchmark):
+        """期货池基准解析：返回 (mode, benchmark)。
+
+        mode=None  非期货池 → 沿用股票基准（行为不变）；
+        mode="stock_index"  股指期货 → config.FUTURE_BENCHMARK_MAP 映射的全收益指数
+                 （映射 None / 多品种映射不一致 → benchmark=None 仅绝对收益 + 告警）；
+        mode="commodity_buyhold"  商品期货 → benchmark=None，prepare 后构建
+                 同品种连续合约 buy&hold 基准并标注；
+        期货+非期货混合池 → raise（基准口径不可混合）。
+        显式传入 benchmark 时仅当与规则解析结果一致才放行，否则 raise（禁止
+        跨资产混用，如给 RB 传 H00300）。
+        """
+        mkts = {config.detect_market_type(s) for s in (symbols or [])}
+        if not (mkts & DERIVATIVE_MARKETS):
+            return None, explicit_benchmark or config.BENCHMARK
+        if not mkts <= DERIVATIVE_MARKETS:
+            raise ValueError(
+                f"回测池混含期货与非期货标的 {sorted(symbols)}：基准口径不可混合"
+                "（禁止跨资产混用基准），请分开回测")
+        stock_index = set(config.FUTURE_BENCHMARK_MAP)
+        varieties = {self._variety_of(s) for s in symbols}
+        if varieties <= stock_index:                       # 股指期货池
+            codes = {config.FUTURE_BENCHMARK_MAP[v] for v in varieties}
+            if len(codes) == 1 and None not in codes:
+                bench = codes.pop()
+            else:
+                bench = None                               # None 映射/多品种不一致
+                missing = sorted(v for v in varieties
+                                 if not config.FUTURE_BENCHMARK_MAP.get(v))
+                self._pending_bench_note = (
+                    f"股指期货品种 {missing} 无已登记的全收益指数映射（禁止猜测代码），"
+                    "仅披露绝对收益与风险指标")
+            if explicit_benchmark and explicit_benchmark != (bench or ""):
+                raise ValueError(
+                    f"股指期货回测基准必须用治理面映射 {bench}，收到 {explicit_benchmark!r}"
+                    "（禁止跨资产混用基准）")
+            return "stock_index", bench
+        # 商品期货（含外盘期货）池：无公开现货指数基准
+        if explicit_benchmark:
+            raise ValueError(
+                f"商品期货回测无对应外部基准（禁止跨资产混用），收到 {explicit_benchmark!r}；"
+                "引擎将自动以同品种连续合约 buy&hold 作参照并明确标注")
+        return "commodity_buyhold", None
+
+    def _build_buyhold_benchmark(self) -> Optional[pd.DataFrame]:
+        """商品期货 buy&hold 基准：同品种连续合约（调整序列）首日买入持有权益。"""
+        for symbol, frame in self.frames.items():
+            if "close" not in frame.columns or not len(frame):
+                continue
+            close = pd.to_numeric(frame["close"], errors="coerce").dropna()
+            if len(close) < 2:
+                continue
+            bench = pd.DataFrame({
+                "benchmark_equity": self.initial_capital
+                * close / float(close.iloc[0])},
+                index=close.index)
+            bench.attrs.update({
+                "future_benchmark": "self_continuous_buy_hold",
+                "note": "商品期货无对应公开基准，参照=同品种连续合约调整序列买入持有；"
+                        "仅披露绝对收益与风险指标，禁止与股票基准混用",
+            })
+            self.logger.info(
+                "期货基准：%s 无对应公开基准，采用同品种连续合约 buy&hold 参照"
+                "（仅披露绝对收益与风险指标）", symbol)
+            return bench
+        return None
+
     def _fetch_benchmark(self) -> Optional[pd.DataFrame]:
         if not self.benchmark:
+            if self.future_benchmark_mode == "commodity_buyhold":
+                return self._build_buyhold_benchmark()
+            note = getattr(self, "_pending_bench_note", None)
+            if note:
+                self.logger.warning("%s", note)
             return None
         try:
             frame = self.fetcher.get_daily(
@@ -711,7 +801,22 @@ class Backtester:
                                       "slippage": self.execution.slippage})
         result.traps = self.detect_traps(result)
         # D-1：拒单与熔断状态随正式引擎结果落盘（CLI 留痕/验收对账同源）
-        result.rejected = list(getattr(self.account, "rejected_orders", []) or [])
+        # 拒单双来源合并（v3.54 终验）：策略闸拒单（warmup/熔断/风控）+ 撮合层
+        # 拒单（资金不足/涨跌停/量限）——只收一层会漏披策略层拦截（对账发现：
+        # 决策日志 544 = 成交 543 + 熔断拒单 1）。⚠ strategy.rejected_orders
+        # 混收 pending 排队回执（stage=account，非拒单），必须按 status 过滤；
+        # 策略层记录缺 code 字段，统一走 classify_rejection 兜底补齐
+        from core import signal_gate as _gate
+        merged = []
+        for r in (list(getattr(self.strategy, "rejected_orders", []) or [])
+                  + list(getattr(self.account, "rejected_orders", []) or [])):
+            if str(r.get("status")) != "rejected":
+                continue
+            if not r.get("code"):
+                r = dict(r)
+                r["code"] = _gate.classify_rejection(r.get("reason"))
+            merged.append(r)
+        result.rejected = merged
         result.halt_state = (strategy.risk_manager.halt_state()
                              if getattr(strategy, "risk_manager", None) else {})
         result.run_mode = self.run_mode
@@ -727,6 +832,15 @@ class Backtester:
             & (self.benchmark_frame.index <= nav["date"].iloc[-1])]
         if not len(frame):
             return pd.DataFrame()
+        # 基准帧两种形态：指数取数帧（close 列，归一化）｜期货 buy&hold 帧
+        # （已带 benchmark_equity，直接切片——商品期货无对应外部基准，禁止
+        # 再造一层「close」伪装）
+        if "benchmark_equity" in frame.columns:
+            return pd.DataFrame({
+                "date": frame.index,
+                "benchmark_equity": pd.to_numeric(frame["benchmark_equity"],
+                                                  errors="coerce").values,
+            })
         base = float(frame["close"].iloc[0]) or 1.0
         out = pd.DataFrame({
             "date": frame.index,

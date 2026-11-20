@@ -1,1 +1,1 @@
-3e43c06db59f9f65026045ee4abe67401e969f045df396085d606ee29e6be1d4  config.py（cs-v1：常量 167 + 白名单块 30 个递归键 594，共 760 元素；排序后换行 join + 尾换行再 sha256，只比结构不比取值；v3.54 滚动：LIVE_SAFETY 增 live_allowed_markets（13.0.25 live 市场白名单入治理面），前值 3de3377b…/759）
+d2e7fafe0fed4fb059057406f88b93425f4811094400c53e530fffc768bccffa  config.py（cs-v1：常量 168 + 白名单块 30 个递归键 594，共 761 元素；排序后换行 join + 尾换行再 sha256，只比结构不比取值；v3.54 终验：新增顶层常量 FUTURE_BENCHMARK_MAP 期货基准映射（股指→全收益指数，禁止跨资产混用，值指纹第 8 键），前值 3e43c06d…/760）

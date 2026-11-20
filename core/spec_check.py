@@ -29,7 +29,8 @@ VALUE_FINGERPRINT_KEYS = [
     "INITIAL_CASH",           # 绩效分母
     "EXECUTION_MODEL",        # 滑点/撮合基准/量限（值级变化直接影响成交模拟）
     "RISK",                   # 熔断阈值/单票上限/费率相关风控参数
-    "CN_FUTURES_VARIETY",     # 期货合约规格（乘数/保证金率/手续费——值级口径）
+    "CN_FUTURES_VARIETY",     # 期货合约规格（乘数/保证金率/tick/涨跌停/开平平今费率——值级口径）
+    "FUTURE_BENCHMARK_MAP",   # 期货基准映射（股指→全收益指数；禁止跨资产混用的值级守护）
     "LIVE_SAFETY",            # live_allowed_markets 白名单等实盘安全参数
 ]
 

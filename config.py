@@ -822,8 +822,8 @@ CN_FUTURES_VARIETY = {
            "commission_rate_close_today": 0.00003, "commission_type": "per_value",
            "price_limit": 0.06, "night_session": [(21*60, 1*60)]},
     "ZN": {"exchange": "SHFE", "multiplier": 5, "tick": 5, "margin_rate": 0.10,
-           "commission_rate_open": 3, "commission_rate_close": 3,
-           "commission_rate_close_today": 3, "commission_type": "per_lot",
+           "commission_per_lot_open": 3, "commission_per_lot_close": 3,
+           "commission_per_lot_close_today": 3, "commission_type": "per_lot",
            "price_limit": 0.06, "night_session": [(21*60, 1*60)]},
     "AU": {"exchange": "SHFE", "multiplier": 1000, "tick": 0.02, "margin_rate": 0.08,
            "commission_rate_open": 0.00002, "commission_rate_close": 0.00002,
@@ -834,44 +834,44 @@ CN_FUTURES_VARIETY = {
            "commission_rate_close_today": 0.00005, "commission_type": "per_value",
            "price_limit": 0.08, "night_session": [(21*60, 2*60+30)]},
     "SC": {"exchange": "INE",  "multiplier": 1000, "tick": 0.1, "margin_rate": 0.10,
-           "commission_rate_open": 20, "commission_rate_close": 20,
-           "commission_rate_close_today": 20, "commission_type": "per_lot",
+           "commission_per_lot_open": 20, "commission_per_lot_close": 20,
+           "commission_per_lot_close_today": 20, "commission_type": "per_lot",
            "price_limit": 0.08, "night_session": [(21*60, 2*60+30)]},
     "FU": {"exchange": "SHFE", "multiplier": 10, "tick": 1, "margin_rate": 0.10,
            "commission_rate_open": 0.00005, "commission_rate_close": 0.00005,
            "commission_rate_close_today": 0.00005, "commission_type": "per_value",
            "price_limit": 0.10, "night_session": [(21*60, 23*60)]},
     "RU": {"exchange": "SHFE", "multiplier": 10, "tick": 5, "margin_rate": 0.10,
-           "commission_rate_open": 3, "commission_rate_close": 3,
-           "commission_rate_close_today": 3, "commission_type": "per_lot",
+           "commission_per_lot_open": 3, "commission_per_lot_close": 3,
+           "commission_per_lot_close_today": 3, "commission_type": "per_lot",
            "price_limit": 0.07, "night_session": [(21*60, 23*60)]},
     "NI": {"exchange": "SHFE", "multiplier": 1, "tick": 10, "margin_rate": 0.10,
-           "commission_rate_open": 6, "commission_rate_close": 6,
-           "commission_rate_close_today": 6, "commission_type": "per_lot",
+           "commission_per_lot_open": 6, "commission_per_lot_close": 6,
+           "commission_per_lot_close_today": 6, "commission_type": "per_lot",
            "price_limit": 0.08, "night_session": [(21*60, 1*60)]},
     "SS": {"exchange": "SHFE", "multiplier": 5, "tick": 5, "margin_rate": 0.10,
-           "commission_rate_open": 3, "commission_rate_close": 3,
-           "commission_rate_close_today": 3, "commission_type": "per_lot",
+           "commission_per_lot_open": 3, "commission_per_lot_close": 3,
+           "commission_per_lot_close_today": 3, "commission_type": "per_lot",
            "price_limit": 0.07, "night_session": [(21*60, 1*60)]},
     "A": {"exchange": "DCE",  "multiplier": 10, "tick": 1, "margin_rate": 0.08,
-          "commission_rate_open": 2, "commission_rate_close": 2,
-          "commission_rate_close_today": 2, "commission_type": "per_lot",
+          "commission_per_lot_open": 2, "commission_per_lot_close": 2,
+          "commission_per_lot_close_today": 2, "commission_type": "per_lot",
           "price_limit": 0.07, "night_session": [(21*60, 23*60)]},
     "M": {"exchange": "DCE",  "multiplier": 10, "tick": 1, "margin_rate": 0.08,
-          "commission_rate_open": 1.5, "commission_rate_close": 1.5,
-          "commission_rate_close_today": 1.5, "commission_type": "per_lot",
+          "commission_per_lot_open": 1.5, "commission_per_lot_close": 1.5,
+          "commission_per_lot_close_today": 1.5, "commission_type": "per_lot",
           "price_limit": 0.07, "night_session": [(21*60, 23*60)]},
     "Y": {"exchange": "DCE",  "multiplier": 10, "tick": 2, "margin_rate": 0.08,
-          "commission_rate_open": 2.5, "commission_rate_close": 2.5,
-          "commission_rate_close_today": 2.5, "commission_type": "per_lot",
+          "commission_per_lot_open": 2.5, "commission_per_lot_close": 2.5,
+          "commission_per_lot_close_today": 2.5, "commission_type": "per_lot",
           "price_limit": 0.07, "night_session": [(21*60, 23*60)]},
     "P": {"exchange": "DCE",  "multiplier": 10, "tick": 2, "margin_rate": 0.08,
-          "commission_rate_open": 2.5, "commission_rate_close": 2.5,
-          "commission_rate_close_today": 2.5, "commission_type": "per_lot",
+          "commission_per_lot_open": 2.5, "commission_per_lot_close": 2.5,
+          "commission_per_lot_close_today": 2.5, "commission_type": "per_lot",
           "price_limit": 0.07, "night_session": [(21*60, 23*60)]},
     "C": {"exchange": "DCE",  "multiplier": 10, "tick": 1, "margin_rate": 0.08,
-          "commission_rate_open": 1.2, "commission_rate_close": 1.2,
-          "commission_rate_close_today": 1.2, "commission_type": "per_lot",
+          "commission_per_lot_open": 1.2, "commission_per_lot_close": 1.2,
+          "commission_per_lot_close_today": 1.2, "commission_type": "per_lot",
           "price_limit": 0.07, "night_session": [(21*60, 23*60)]},
     "I": {"exchange": "DCE",  "multiplier": 100, "tick": 0.5, "margin_rate": 0.12,
           "commission_rate_open": 0.0001, "commission_rate_close": 0.0001,
@@ -886,20 +886,20 @@ CN_FUTURES_VARIETY = {
            "commission_rate_close_today": 0.00006, "commission_type": "per_value",
            "price_limit": 0.10, "night_session": [(21*60, 23*60)]},
     "SR": {"exchange": "CZCE", "multiplier": 10, "tick": 1, "margin_rate": 0.07,
-           "commission_rate_open": 3, "commission_rate_close": 3,
-           "commission_rate_close_today": 3, "commission_type": "per_lot",
+           "commission_per_lot_open": 3, "commission_per_lot_close": 3,
+           "commission_per_lot_close_today": 3, "commission_type": "per_lot",
            "price_limit": 0.07, "night_session": [(21*60, 23*60)]},
     "CF": {"exchange": "CZCE", "multiplier": 5, "tick": 5, "margin_rate": 0.07,
-           "commission_rate_open": 4.3, "commission_rate_close": 4.3,
-           "commission_rate_close_today": 4.3, "commission_type": "per_lot",
+           "commission_per_lot_open": 4.3, "commission_per_lot_close": 4.3,
+           "commission_per_lot_close_today": 4.3, "commission_type": "per_lot",
            "price_limit": 0.07, "night_session": [(21*60, 23*60)]},
     "MA": {"exchange": "CZCE", "multiplier": 10, "tick": 1, "margin_rate": 0.08,
-           "commission_rate_open": 1.4, "commission_rate_close": 1.4,
-           "commission_rate_close_today": 1.4, "commission_type": "per_lot",
+           "commission_per_lot_open": 1.4, "commission_per_lot_close": 1.4,
+           "commission_per_lot_close_today": 1.4, "commission_type": "per_lot",
            "price_limit": 0.07, "night_session": [(21*60, 23*60)]},
     "TA": {"exchange": "CZCE", "multiplier": 5, "tick": 2, "margin_rate": 0.07,
-           "commission_rate_open": 3, "commission_rate_close": 3,
-           "commission_rate_close_today": 3, "commission_type": "per_lot",
+           "commission_per_lot_open": 3, "commission_per_lot_close": 3,
+           "commission_per_lot_close_today": 3, "commission_type": "per_lot",
            "price_limit": 0.07, "night_session": [(21*60, 23*60)]},
     "IF": {"exchange": "CFFEX","multiplier": 300, "tick": 0.2, "margin_rate": 0.10,
            "commission_rate_open": 0.000023, "commission_rate_close": 0.000023,
@@ -930,6 +930,21 @@ CN_FUTURES_VARIETY = {
            "commission_per_lot_open": 1, "commission_per_lot_close": 1,
            "commission_per_lot_close_today": 1, "commission_type": "per_lot",
            "price_limit": 0.08, "night_session": [(21*60, 23*60)]},
+}
+
+# 期货基准匹配规则（v3.54 评审终验裁定）：禁止跨资产混用基准——期货回测
+# 永不套用股票基准（BENCHMARK=H00300 仅限 A 股现货池）。
+# - 股指期货 → 对应标的全收益指数（值级变更走基准口径登记表 + 值指纹）；
+#   仅登记已确认代码（IF→H00300 / IC→H00905），IH/IM 全收益指数代码待核实，
+#   禁止按命名规律猜测——映射值为 None 时回退「仅披露绝对收益」并告警；
+# - 商品期货 → 无公开现货指数基准，默认用同品种连续合约 buy&hold（自身调整
+#   序列首日买入持有，backtester 自动构建并标注 self_continuous_buy_hold），
+#   报告明确标注「无对应基准，仅披露绝对收益与风险指标」。
+FUTURE_BENCHMARK_MAP = {
+    "IF": "H00300",   # 沪深300全收益
+    "IC": "H00905",   # 中证500全收益
+    "IH": None,       # 上证50全收益——代码待核实，禁止猜测；None=仅绝对收益
+    "IM": None,       # 中证1000全收益——代码待核实，禁止猜测；None=仅绝对收益
 }
 
 def get_future_variety_params(symbol: str):
@@ -2609,11 +2624,11 @@ CONFIG_SURFACE = {
     "surface_collection_must_be_ast_based": True,
     "dir_based_collection_forbidden": True,
     "surface_expected_counts": {
-        # v3.54 滚动实测（frozen_counts_are_outputs_not_criteria：这是产物快照
-        # 非门槛，--check 只对黄金向量 exit 1）；前值 167/646/593/759 为 v3.53。
-        # v3.54 变化：LIVE_SAFETY 增 live_allowed_markets 一键（13.0.25 live 白名单
-        # 入治理面）→ 760 元素，登记件 3e43c06d…
-        "n_consts": 167, "n_keys_raw": 647, "n_keys_uniq": 594, "n_elements": 760,
+        # v3.54 终验实测（frozen_counts_are_outputs_not_criteria：这是产物快照
+        # 非门槛，--check 只对黄金向量 exit 1）；前值 167/647/594/760 为 v3.54 首登。
+        # 变化：新增顶层常量 FUTURE_BENCHMARK_MAP（期货基准映射，非白名单块不递归）
+        # → 761 元素，登记件 d2e7fafe…；值指纹键同步增至 8 个（5399e7f5…）
+        "n_consts": 168, "n_keys_raw": 647, "n_keys_uniq": 594, "n_elements": 761,
     },
     "hand_typed_expected_forbidden": True,
     "surface_dump_file": "config_surface.elements.txt",

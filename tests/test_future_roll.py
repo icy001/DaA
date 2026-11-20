@@ -186,5 +186,100 @@ def test_prev_close_daily_frame_unchanged():
     assert out["600519"] == pytest.approx(1400.0)
 
 
+# ==================== 终验 z5：期货基准规则 + 平今平昨费率区分 ====================
+
+def _resolve_shell(symbols, explicit=None):
+    """基准解析壳：仅 _resolve_future_benchmark 依赖的最小属性。"""
+    bt = Backtester.__new__(Backtester)
+    bt._pending_bench_note = None
+    return bt._resolve_future_benchmark(symbols, explicit)
+
+
+def test_future_benchmark_commodity_buyhold():
+    """商品期货无对应外部基准：默认同品种连续合约 buy&hold，绝不套 H00300。"""
+    mode, bench = _resolve_shell(["RB0"])
+    assert mode == "commodity_buyhold"
+    assert bench is None
+    mode, bench = _resolve_shell(["RB2510", "HC2510"])
+    assert mode == "commodity_buyhold" and bench is None
+    # 显式传股票基准给商品期货 → raise（禁止跨资产混用）
+    with pytest.raises(ValueError, match="禁止跨资产混用"):
+        _resolve_shell(["RB0"], "H00300")
+
+
+def test_future_benchmark_stock_index_map():
+    """股指期货映射全收益指数：IF→H00300、IC→H00905；IH/IM 代码未登记→None+告警。"""
+    assert _resolve_shell(["IF2512"]) == ("stock_index", "H00300")
+    assert _resolve_shell(["IC2512"]) == ("stock_index", "H00905")
+    mode, bench = _resolve_shell(["IH2512"])
+    assert mode == "stock_index" and bench is None
+    # IF 池显式传映射值放行；传其它基准 raise
+    assert _resolve_shell(["IF2512"], "H00300") == ("stock_index", "H00300")
+    with pytest.raises(ValueError, match="禁止跨资产混用"):
+        _resolve_shell(["IF2512"], "000300")
+
+
+def test_future_benchmark_mixed_pool_raises():
+    """期货+非期货混合池直接 raise（基准口径不可混合，fail-closed）。"""
+    with pytest.raises(ValueError, match="基准口径不可混合"):
+        _resolve_shell(["RB0", "600519"])
+
+
+def test_stock_pool_benchmark_unchanged():
+    """非期货池沿用股票基准（行为不变）。"""
+    mode, bench = _resolve_shell(["600519"])
+    assert mode is None
+    assert bench == config.BENCHMARK
+
+
+def test_buyhold_benchmark_frame():
+    """buy&hold 基准帧：首日=初始权益、比例跟随调整序列、attrs 明确标注口径。"""
+    bt = Backtester.__new__(Backtester)
+    bt.initial_capital = 1_000_000.0
+    bt.logger = logging.getLogger("test_future_roll")
+    idx = pd.bdate_range("2026-01-05", periods=4)
+    bt.frames = {"RB0": pd.DataFrame(
+        {"close": [3100.0, 3200.0, 3150.0, 3250.0]}, index=idx)}
+    bench = bt._build_buyhold_benchmark()
+    assert bench is not None
+    assert float(bench["benchmark_equity"].iloc[0]) == pytest.approx(1_000_000.0)
+    assert float(bench["benchmark_equity"].iloc[-1]) == pytest.approx(
+        1_000_000.0 * 3250.0 / 3100.0)
+    assert bench.attrs["future_benchmark"] == "self_continuous_buy_hold"
+    assert "禁止与股票基准混用" in bench.attrs["note"]
+
+
+def test_close_today_fee_distinct_from_close():
+    """平今/平昨费率区分（IF：平今 0.000345 vs 平昨 0.000023，15 倍）——
+    未区分则默认同费率属静默口径错误，禁止。"""
+    acc = TradingAccount(1_000_000, run_mode="backtest")
+    fee_close = acc.calc_commission("IF2512", "sell", 4000.0, 1,
+                                    is_close_today=False, market_type="cn_future",
+                                    is_open=False)
+    fee_today = acc.calc_commission("IF2512", "sell", 4000.0, 1,
+                                    is_close_today=True, market_type="cn_future",
+                                    is_open=False)
+    assert fee_close == pytest.approx(4000.0 * 300 * 0.000023, abs=0.01)
+    assert fee_today == pytest.approx(4000.0 * 300 * 0.000345, abs=0.01)
+    assert fee_today > fee_close * 10
+
+
+def test_variety_spec_five_keys_complete():
+    """治理面合约规格五件套完整性：全部品种必须带乘数/保证金率/tick/涨跌停/开平平今费率。"""
+    required = {"multiplier", "margin_rate", "tick", "price_limit"}
+    for variety, spec in config.CN_FUTURES_VARIETY.items():
+        missing = required - set(spec)
+        assert not missing, f"{variety} 缺规格键 {missing}"
+        assert {"commission_type"} <= set(spec)
+        if spec.get("commission_type") == "per_lot":
+            keys = {"commission_per_lot_open", "commission_per_lot_close",
+                    "commission_per_lot_close_today"}
+        else:
+            keys = {"commission_rate_open", "commission_rate_close",
+                    "commission_rate_close_today"}
+        miss_fee = keys - set(spec)
+        assert not miss_fee, f"{variety} 缺费率键 {miss_fee}"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

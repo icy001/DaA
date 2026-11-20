@@ -200,7 +200,7 @@ _REASON_RULES = (
     ("off_session", ("非交易时段", "休市", "session")),
     ("limit_up_down", ("涨停", "跌停", "涨跌停", "limit_up", "limit_down")),
     ("volume_limit", ("成交量", "量限", "流动性", "volume", "成交上限")),
-    ("risk_block", ("风控", "保证金", "仓位上限", "risk", "集中度")),
+    ("risk_block", ("风控", "保证金", "仓位上限", "risk", "集中度", "熔断")),
 )
 
 
