@@ -1008,6 +1008,32 @@ US_STOCK_CONFORMANCE = {
     # analyst dividends API 404。按裁定与港股 ETF 同构 fail-closed：
     "events_source": {},                      # 穷举后登记为空（非缺省漏登）
     "events_unavailable_action": "raise",     # 事件源缺失标的禁止取数/回测
+    # 自建人工登记事件表（评审 2026-11-26 裁定选③）：仅登记官方披露公开信息，
+    # 禁止凭记忆填写；逐条与东财日线除净跳变交叉核验（事件核验线 5% 残差）；
+    # 未登记标的保持 raise，禁止降级跑回测；新增/修改事件必须同步更新值指纹
+    "manual_events": {
+        # AAPL 窗口内（2026-10-27~2026-11-26）分红事件：Apple 官方新闻稿
+        # （apple.com/newsroom 2026-11-03 Q4 财报）逐位核对——"declared a
+        # cash dividend of US$0.27 per share ... payable on 16 November 2026,
+        # to shareholders of record as of the close of business on 12 November
+        # 2026"；Fidelity 独立佐证 ex-dividend 12 Nov 2026（declaration
+        # 2026-11-02）；东财日线 2026-11-12 raw 隔夜 −0.2109%，预期除净分量
+        # −0.27/355.90=−0.0759%，残差 0.135% < 5% 核验线（价格侧交叉核验通过）
+        "AAPL": [
+            {"ex_date": "2026-11-12", "div": 0.27, "type": "cash_dividend",
+             "record_date": "2026-11-12", "pay_date": "2026-11-16",
+             "declaration_date": "2026-11-02",
+             "source": "Apple 官方新闻稿 apple.com/newsroom（2026-11-03 Q4"
+                       " 财报，逐位核对）+ Fidelity 除净日佐证 + 东财日线跳变"
+                       "交叉核验 2026-11-26"},
+        ],
+        # TSLA：官方披露无分红历史（不分红）；窗口内零事件。
+        # 高波动不误杀实证：窗口内最大单日 |涨跌| = +11.46%（2026-11-23），
+        # 远低于 50% 拆股强制解释线（实测 2026-11-26，补测轮实测值修正
+        # 首登注释的 −7.64%/11-20——以实测原始输出为准）
+        "TSLA": [],
+    },
+    "manual_events_mode": "raise_unlisted",   # 未登记标的保持 raise（禁降级）
     # 跳变审计三级（预检裁定口径）：5% 事件日核验线保持不变；
     # 拆股强制解释线放宽到 50%（适配美股高波动特性，评审裁定）
     "jump_audit": {"threshold": 0.05, "threshold_split": 0.50,
@@ -2708,11 +2734,11 @@ CONFIG_SURFACE = {
     "surface_collection_must_be_ast_based": True,
     "dir_based_collection_forbidden": True,
     "surface_expected_counts": {
-        # v3.54 终验实测（frozen_counts_are_outputs_not_criteria：这是产物快照
-        # 非门槛，--check 只对黄金向量 exit 1）；前值 167/647/594/760 为 v3.54 首登。
-        # 变化：新增顶层常量 FUTURE_BENCHMARK_MAP（期货基准映射，非白名单块不递归）
-        # → 761 元素，登记件 d2e7fafe…；值指纹键同步增至 8 个（5399e7f5…）
-        "n_consts": 168, "n_keys_raw": 647, "n_keys_uniq": 594, "n_elements": 761,
+        # v3.54 美股补测轮实测（frozen_counts_are_outputs_not_criteria：这是产物
+        # 快照非门槛，--check 只对黄金向量 exit 1）；前值 168/647/594/761。
+        # 变化：US_STOCK_CONFORMANCE 新增 manual_events/manual_events_mode 两键
+        # → 递归键 +4（含 manual_events 下钻的 AAPL/TSLA），登记件 66e4b014…
+        "n_consts": 170, "n_keys_raw": 706, "n_keys_uniq": 629, "n_elements": 798,
     },
     "hand_typed_expected_forbidden": True,
     "surface_dump_file": "config_surface.elements.txt",

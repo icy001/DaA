@@ -1172,6 +1172,14 @@ def main() -> int:
             else:
                 print(f"\n⚠️  【{title}】{symbol} 返回空数据")
         except Exception as exc:  # noqa: BLE001
+            # v3.54 美股补测轮（评审裁定原文「未登记事件的美股标的保持
+            # fail-closed raise，禁止降级跑回测」）：美股未登记 manual_events
+            # 的标的被闸拦截属【预期正确行为】，按通过计数并标注，不再列待检查项
+            if "manual_events" in str(exc):
+                results.append((title, symbol, True,
+                                "预期 fail-closed raise（manual_events 未登记，评审裁定）"))
+                print(f"\n✅ 【{title}】{symbol} 预期 fail-closed raise（manual_events 未登记）")
+                continue
             results.append((title, symbol, False, str(exc)))
             print(f"\n⚠️  【{title}】{symbol} 获取失败，跳过：{exc}")
 

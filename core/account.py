@@ -55,9 +55,16 @@ import config
 from core.data_fetcher import assert_fresh_for_trading
 from core.utils import is_trading_day, setup_logger
 
-# 简化固定汇率（→CNY）；实盘必须替换为实时汇率
+# 简化固定汇率（→CNY）；实盘必须替换为实时汇率。
+# USD 单一权威=治理面 US_STOCK_CONFORMANCE["fx_fixed_cny"]（评审裁定 7.20）：
+# 默认表禁止另写一份数值造成静默漂移（v3.54 美股补测轮修正，原硬编码 7.10
+# 与治理面 7.20 不一致——回测注入路径掩盖了默认路径的口径分裂）。
+# HKD 0.92 仅为无注入时的兜底：港股基线口径（0.85618）由回测层显式注入。
 DEFAULT_FX_RATES = {
-    "CNY": 1.0, "USD": 7.10, "HKD": 0.92, "JPY": 0.047, "EUR": 7.80,
+    "CNY": 1.0,
+    "USD": float((getattr(config, "US_STOCK_CONFORMANCE", {}) or {})
+                 .get("fx_fixed_cny") or 7.20),
+    "HKD": 0.92, "JPY": 0.047, "EUR": 7.80,
     "GBP": 9.10, "CHF": 8.05, "AUD": 4.70, "CAD": 5.20, "NZD": 4.30,
 }
 

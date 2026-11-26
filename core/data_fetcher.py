@@ -421,18 +421,23 @@ class DataFetcher:
             # （与 cn_index 同构处理，v3.54 港股正式接入）
             adjust = "none"
         if market in ("us_stock", "us_etf"):
-            # 美股事件源闸（评审 2026-11-26 裁定）必须挡在【路由之前】：
+            # 美股事件闸（评审 2026-11-26 裁定选③人工事件表）必须挡在【路由之前】：
             # DataRouter 适配器路径会绕过 _fetch_us_stock_daily 的出口闸
             # （实测 AAPL 经 router 直连成功、TSLA 失败才落老链路——同一闸门
-            # 两种行为不可接受），穷举无事件源时禁止任何取数路径放行
+            # 两种行为不可接受）。manual_events 已登记标的放行走自建双价出口；
+            # 未登记标的（含后续新增）保持 fail-closed raise，禁止降级跑回测
             us_conf = getattr(config, "US_STOCK_CONFORMANCE", {}) or {}
-            if not (us_conf.get("events_source") or {}) and str(
-                    us_conf.get("events_unavailable_action") or "raise") == "raise":
+            us_registry = {str(k).upper() for k in (us_conf.get("manual_events") or {})}
+            if str(symbol).upper() not in us_registry and str(
+                    us_conf.get("manual_events_mode") or "raise_unlisted") == "raise_unlisted":
                 raise RuntimeError(
-                    f"美股 {symbol} 分红/拆股事件源缺失（四渠道穷举无公开免费"
-                    f"结构化事件源，治理面 events_source 为空），"
-                    f"events_unavailable_action=raise：禁止以 raw 或无事件 adj "
-                    "任何形式放行；待接入权威事件源后按治理面登记放行")
+                    f"美股 {symbol} 未在治理面 manual_events 登记分红/拆股事件覆盖"
+                    f"（manual_events_mode=raise_unlisted）：fail-closed 禁止取数/"
+                    "回测——仅放行已逐位核对官方披露数据并登记完整事件的标的，"
+                    "禁止降级")
+            # 与港股同构：缓存名统一标 none（出口固定 raw 取数、双价自建，
+            # 请求口径对出口帧无影响，qfq/hfq 文件名装黑箱复权价会造成口径错位）
+            adjust = "none"
 
         if market in _ADJ_MARKETS:
             raw = self._get_raw_daily(market, symbol, start, end)
@@ -453,12 +458,13 @@ class DataFetcher:
 
         cache_file = self._cache_path(market, symbol, "daily", adjust)
         cached = self._read_cache(cache_file)
-        if market == "hk_stock" and cached is not None and (
+        if market in ("hk_stock", "us_stock", "us_etf") and cached is not None and (
                 "dual_price" not in cached.attrs or "adjust" not in cached.attrs):
             # 自建双价出口启用前的旧缓存缺双价标注：口径不明，fail-closed 拒读
-            # （00700 曾出现 21 行旧毒缓存被静默喂给下游），必须删除后重取
+            # （00700 曾出现 21 行旧毒缓存被静默喂给下游；美股 precheck 期旧缓存
+            # 同为无事件 raw 帧），必须删除后重取
             raise RuntimeError(
-                f"[hk_stock] {symbol} 日线缓存缺双价口径标注"
+                f"[{market}] {symbol} 日线缓存缺双价口径标注"
                 f"（dual_price/adjust，{cache_file.name}）："
                 "旧版缓存禁止静默读取，请删除该缓存文件后重取")
         if cached is not None and not self._cache_expired(cache_file, "daily") \
@@ -1694,50 +1700,141 @@ class DataFetcher:
 
 
     def _fetch_us_stock_daily(self, symbol, start, end, adjust):
-        # 事件源闸（评审 2026-11-26 裁定，与港股 ETF 同构 fail-closed）：
-        # 美股公开免费渠道无结构化分红/拆股事件源（穷举证据登记
-        # US_STOCK_CONFORMANCE），raw 序列带拆股跳变同样污染信号——
-        # 事件源接入前禁止取数/回测，禁止降级 raw-only 放行
+        """美股日线自建双价出口（评审 2026-11-26 裁定选③：人工登记事件表）。
+
+        - 仅放行治理面 ``US_STOCK_CONFORMANCE.manual_events`` 已登记的标的
+          （事件须逐位核对纳斯达克官网/上市公司官方披露，禁止凭记忆填写）；
+          未登记标的 fail-closed raise，禁止降级以 raw/无事件 adj 放行
+        - raw 固定 adjust="" 取数（禁止消费数据源黑箱复权价，与港股同构），
+          双价由 manual_events 自建因子现算：adj = raw × factor（信号/收益），
+          raw_* 列（撮合/费用/成交记录）
+        - 事件核验/三级跳变审计复用港股共享实现（conf=US_STOCK_CONFORMANCE，
+          拆股强制解释线 50%、事件日核验线 5%），逻辑零拷贝
+        """
         conf = getattr(config, "US_STOCK_CONFORMANCE", {}) or {}
-        if not (conf.get("events_source") or {}):
-            action = str(conf.get("events_unavailable_action") or "raise")
-            if action == "raise":
+        sym = str(symbol).upper()
+        registry = {str(k).upper(): v for k, v in
+                    (conf.get("manual_events") or {}).items()}
+        events_spec = registry.get(sym)
+        # 评审裁定（选③）：未登记事件覆盖的标的禁止取数/回测（含后续新增
+        # 标的），保持 raise 不放松；登记标的（含零事件登记如 TSLA）放行
+        if events_spec is None:
+            mode = str(conf.get("manual_events_mode") or "raise_unlisted")
+            if mode == "raise_unlisted":
                 raise RuntimeError(
-                    f"美股 {symbol} 分红/拆股事件源缺失（四渠道穷举无公开免费"
-                    f"结构化事件源，治理面 events_source 为空），"
-                    f"events_unavailable_action=raise：禁止以 raw 或无事件 adj "
-                    "任何形式放行；待接入权威事件源后按治理面登记放行")
-            raise ValueError(f"未知 events_unavailable_action: {action}")
-        code = self._resolve_us_symbol(symbol)
+                    f"美股 {sym} 未在治理面 manual_events 登记分红/拆股事件覆盖"
+                    f"（manual_events_mode=raise_unlisted）：fail-closed 禁止取数/"
+                    "回测——raw 序列带未解释除净/拆股跳变会污染信号；仅放行已逐位"
+                    "核对官方披露数据并登记完整事件的标的，禁止降级")
+            raise ValueError(f"未知 manual_events_mode: {mode}")
+        code = self._resolve_us_symbol(sym)
         last_error = None
-        for candidate in ([code] if code else []) + [f"{p}.{symbol.upper()}" for p in ("105", "106", "107")]:
+        df = None
+        # 原始价固定 adjust=""（禁止黑箱复权价；请求口径对出口帧无影响）
+        for candidate in ([code] if code else []) + [f"{p}.{sym}" for p in ("105", "106", "107")]:
             if not candidate:
                 continue
             try:
                 raw = self._request(ak.stock_us_hist, symbol=candidate, period="daily",
-                                    start_date=start, end_date=end, adjust=adjust or "",
+                                    start_date=start, end_date=end, adjust="",
                                     _source="eastmoney")
-                df = self._standardize(raw, interface="stock_us_hist",
-                                       market="us_stock", symbol=symbol)
+                cand_df = self._standardize(raw, interface="stock_us_hist",
+                                            market="us_stock", symbol=sym)
+                if not cand_df.empty:
+                    cand_df.attrs["resolved_symbol"] = candidate
+                    df = cand_df
+                    break
+            except Exception as exc:  # noqa: BLE001 - 东财失败时改用新浪源
+                last_error = exc
+        if df is None:
+            try:
+                raw = self._request(ak.stock_us_daily, symbol=sym, adjust="",
+                                    _source="sina")
+                df = self._standardize(raw, interface="stock_us_daily",
+                                       market="us_stock", symbol=sym).loc[start:end]
                 if not df.empty:
-                    df.attrs["resolved_symbol"] = candidate
-                    return df
+                    # 新浪美股日线只有 OHLCV，没有成交额：明确置 NaN，禁止补 0 混进流动性过滤
+                    df = df.copy()
+                    df["amount"] = np.nan
+                    df.attrs["amount_missing"] = True
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-        try:
-            raw = self._request(ak.stock_us_daily, symbol=str(symbol).upper(),
-                                adjust=adjust or "", _source="sina")
-            df = self._standardize(raw, interface="stock_us_daily",
-                                   market="us_stock", symbol=symbol).loc[start:end]
-            if not df.empty:
-                # 新浪美股日线只有 OHLCV，没有成交额：明确置 NaN，禁止补 0 混进流动性过滤
-                df = df.copy()
-                df["amount"] = np.nan
-                df.attrs["amount_missing"] = True
-                return df
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-        raise RuntimeError(f"美股 {symbol} 日线获取失败: {last_error}")
+        if df is None or df.empty:
+            raise RuntimeError(f"美股 {sym} 日线获取失败: {last_error}")
+        # ---- manual_events 自建双价（与港股 _fetch_hk_stock_daily 同构） ----
+        factor = pd.Series(1.0, index=df.index)
+        n_events = 0
+        cum = 1.0
+        event_days = set()
+        for ev in events_spec:
+            exd = pd.Timestamp(ev["ex_date"])
+            etype = str(ev.get("type") or "")
+            if exd not in df.index:
+                continue
+            pos = df.index.get_loc(exd)
+            if pos == 0:
+                continue
+            prev_raw = float(df["close"].iloc[pos - 1])
+            cur_raw = float(df["close"].iloc[pos])
+            if etype == "cash_dividend":
+                div = float(ev.get("div") or 0.0)
+                if prev_raw <= div:
+                    continue
+                cum *= prev_raw / (prev_raw - div)
+                # ① 事件日核验线（5%）：manual_events 与价格矛盾即拒绝（共享实现）
+                self._hk_event_verify(sym, exd, prev_raw, cur_raw, div, conf=conf)
+            elif etype == "split":
+                ratio = float(ev.get("ratio") or 0.0)
+                if ratio <= 0:
+                    raise ValueError(f"美股 {sym} manual_events 拆股比例非法: {ratio}")
+                cum *= ratio
+                # 拆股核验（残差同 5% 核验线）：raw 隔夜跳变应≈1/ratio - 1
+                actual = cur_raw / prev_raw - 1.0
+                expected = 1.0 / ratio - 1.0
+                thr = float((conf.get("jump_audit") or {}).get("threshold") or 0.05)
+                if abs(actual - expected) >= thr:
+                    raise JumpAuditError(
+                        f"美股 {sym} 拆股事件日 {exd.date()} 核验失败：manual_events "
+                        f"登记比例 1:{ratio:g}（预期 raw 跳变 {expected:+.2%}），"
+                        f"实际 {actual:+.2%}，残差 {abs(actual - expected):.2%} ≥ "
+                        f"{thr:.0%}——事件表与价格矛盾，禁止生成 adj 序列")
+            else:
+                raise ValueError(
+                    f"美股 {sym} manual_events 未知事件类型 {etype!r}："
+                    "仅支持 cash_dividend/split（治理面 schema）")
+            factor[factor.index >= exd] = cum
+            event_days.add(exd)
+            n_events += 1
+        # ②③ 拆股强制解释线（50%）+ 无事件审计带（5%~50%，共享实现，conf=US）
+        audit_band = self._hk_jump_audit(sym, df, factor, event_days, conf=conf)
+        # 双价构建（adj 主列 + raw_* 列 + 因子列，与港股同构）
+        for c in ("open", "high", "low", "close"):
+            df[f"raw_{c}"] = df[c]
+            df[c] = df[c] * factor
+        df["adj_factor"] = factor
+        df.attrs.update({
+            "events_source": "manual_events",
+            "n_events_applied": n_events,
+            "dual_price": True,
+            "adjust": "hfq_self_built",
+            "price_adjust": "hfq_self_built",
+            "currency": str(conf.get("currency") or "USD"),
+            "fx_fixed_cny": float(conf.get("fx_fixed_cny") or 7.20),
+        })
+        if len(audit_band):
+            # 无事件审计带（5%~50%）：与港股同构强制持久化——WARNING 日志 +
+            # attrs["audit_warnings"]（回测引擎收集进 result.meta 落盘）
+            df.attrs["audit_warnings"] = audit_band
+            conf_audit = conf.get("jump_audit") or {}
+            self.logger.warning(
+                "[us_stock] %s 无事件审计带 %d 日（%.0f%%~%.0f%%，未拦截，"
+                "与真实波动不可分——明细已写入 attrs.audit_warnings 随回测报告"
+                "落盘）：%s",
+                sym, len(audit_band),
+                float(conf_audit.get("threshold") or 0.05),
+                float(conf_audit.get("threshold_split") or 0.50),
+                "、".join(f"{x['date']} {x['jump']:+.2%}" for x in audit_band))
+        return df
 
     def _hk_event_table(self, code: str, src_name: str):
         """港股事件表拉取与解析（日线/分钟共用单一实现）。
@@ -1770,16 +1867,17 @@ class DataFetcher:
                 out.append((exd, div))
         return out
 
-    def _hk_jump_audit(self, code, df, factor, event_days, adj_close=None):
+    def _hk_jump_audit(self, code, df, factor, event_days, adj_close=None, conf=None):
         """港股三级跳变审计（日线/分钟共用单一实现，阈值完全复用不放松）。
 
         ① 事件日核验线（裁定 5%）：事件日 raw 隔夜跳变与事件幅度残差 ≥5% → raise；
         ② 拆股强制解释线（25%）：adj 序列无事件解释跳变 → JumpAuditError；
         ③ 无事件审计带（5%~25%）：逐日明细列表返回（attrs/回测 meta 持久化）。
-        返回审计带 list[{date, jump}]。事件核验需调用方先传入事件表明细，
-        由 _hk_event_factor 串接；此处只做 ②③ 与返回审计带。
+        返回审计带 list[{date, jump}]。conf 形参供美股（US_STOCK_CONFORMANCE，
+        拆股线 50%）复用同一实现——阈值来自各自治理面，逻辑零拷贝。
         """
-        conf = getattr(config, "HK_STOCK_CONFORMANCE", {}) or {}
+        conf = conf if conf is not None else getattr(
+            config, "HK_STOCK_CONFORMANCE", {}) or {}
         audit = conf.get("jump_audit") or {}
         thr_split = float(audit.get("threshold_split") or 0.25)
         thr_audit = float(audit.get("threshold") or 0.05)
@@ -1799,10 +1897,11 @@ class DataFetcher:
         return [{"date": str(d.date()), "jump": round(float(v), 6)}
                 for d, v in band.items()]
 
-    def _hk_event_verify(self, code, exd, prev_raw, cur_raw, div):
+    def _hk_event_verify(self, code, exd, prev_raw, cur_raw, div, conf=None):
         """① 事件日核验线（裁定 5%，日线/分钟共用）：事件表登记幅度与实际
         raw 隔夜跳变残差 ≥5% → JumpAuditError（漏登/错登/日期错位被抓出）。"""
-        conf = getattr(config, "HK_STOCK_CONFORMANCE", {}) or {}
+        conf = conf if conf is not None else getattr(
+            config, "HK_STOCK_CONFORMANCE", {}) or {}
         audit_thr = float((conf.get("jump_audit") or {}).get("threshold") or 0.05)
         actual = float(cur_raw) / float(prev_raw) - 1.0
         expected = -float(div) / float(prev_raw)

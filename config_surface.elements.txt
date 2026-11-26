@@ -1,6 +1,7 @@
 00700
 02800
 A
+AAPL
 ACCEPTANCE_GOVERNANCE
 ADJ_FACTOR_DIR
 ADX
@@ -184,6 +185,7 @@ SUPPORTED_PERIODS
 SYSTEM_CONFORMANCE
 SZ
 TRADING_REQUIRE_FRESH
+TSLA
 TUSHARE_TOKEN
 UNIFIED_AMOUNT_UNIT
 UNIFIED_VOLUME_UNIT
@@ -486,6 +488,8 @@ log_rotation_must_not_drop_live_records
 lookahead_safe
 lot_sizes
 manifest
+manual_events
+manual_events_mode
 map_scope_mismatch_action
 map_scope_must_equal_supported_scope
 margin_check

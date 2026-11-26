@@ -161,8 +161,11 @@ def main() -> int:
                        warmup_ok=True)
     sp = us.short_positions.get("AAPL")
     fx = us.fx_rates["USD"]
-    # 卖空属于「卖出」：SEC 费 0.00278% + TAF 0.0166 美分/股
-    us_fee_usd = round(2000 * 0.0000278 + 10 * 0.000166, 2)
+    # 卖空属于「卖出」开仓：佣金 max(10×0.0049, 0.99)=0.99（双边）+ SEC 费
+    # 0.00278% + TAF 0.0166 美分/股（最低 0.01），全部卖出单边官方口径
+    # （v3.54 美股补测轮实测修正：原断言公式漏佣金 0.99，实扣 1.06 USD）
+    us_fee_usd = round(max(10 * 0.0049, 0.99) + 2000 * 0.0000278
+                       + max(10 * 0.000166, 0.01), 2)
     check("美股做空成交（现金按汇率入账）",
           r["status"] == "filled" and sp is not None
           and near(us.cash, 1_000_000 + 2000 * fx - us_fee_usd * fx),
@@ -170,9 +173,12 @@ def main() -> int:
     check("美股做空冻结 50% 保证金", near(us.margin_used, 2000 * fx * 0.5),
           f"margin={us.margin_used:.2f}")
     r = us.place_order("AAPL", "cover", "market", 10, 190.0, order_time=today)
-    us_cost = (2000 - us_fee_usd) / 10  # 开仓卖出费用计入成本
-    exp_cover_pnl = (us_cost - 190) * 10 * fx
-    check("美股回补盈亏 = (200−10)−... 含开仓费用", near(r.get("realized_pnl", 0), exp_cover_pnl),
+    # 回补买入仅佣金（max(10×0.0049, 0.99)=0.99）；realized_pnl = (价差×股数
+    # − 开仓费 − 平仓费) × 汇率（v3.54 补测轮实测修正：原公式漏平仓费）
+    us_fee_close = round(max(10 * 0.0049, 0.99), 2)
+    exp_cover_pnl = ((200 - 190) * 10 - us_fee_usd - us_fee_close) * fx
+    check("美股回补盈亏 = (价差×股数−开仓费−平仓费)×汇率",
+          near(r.get("realized_pnl", 0), exp_cover_pnl),
           f"{r.get('realized_pnl')} vs {exp_cover_pnl:.2f}")
     check("回补后空头持仓清空、保证金释放",
           "AAPL" not in us.short_positions and near(us.margin_used, 0),
