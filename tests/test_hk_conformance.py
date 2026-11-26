@@ -259,5 +259,52 @@ def test_hk_02800_events_unavailable_raises():
         f._fetch_hk_stock_daily("02800", "2026-01-01", "2026-12-31", "")
 
 
+# ==================== 6) 港股 60min 分钟双价（2026-11-26 预检） ====================
+
+def test_hk_60min_dual_price_synthetic(monkeypatch):
+    """合成帧直测 get_kline 60min 港股双价分支：日线因子按所属交易日折算、
+    恒等式逐 bar、attrs 完整（与 cn_stock 分钟双价同构）。"""
+    f = DataFetcher()
+    # 日线 raw（供 _hk_daily_factor 构建因子）：3 日、第 2 日除净 −1%
+    daily_dates = ["2026-01-05", "2026-01-06", "2026-01-07", "2026-01-08"]
+    daily = pd.DataFrame({
+        "日期": daily_dates, "开盘": [100.0, 100.5, 99.0, 99.2],
+        "收盘": [100.0, 100.5, 99.0, 99.2], "最高": [101.0] * 4,
+        "最低": [99.0] * 4, "成交量": [1000.0] * 4, "成交额": [99000.0] * 4,
+    })
+    ev = pd.DataFrame(
+        [["2026-01-06", "2026", "每股派息港币1.0000元", "现金分红"]],
+        columns=["除净日", "财政年度", "分红方案", "分配类型"])
+    # 分钟 raw：除净日当日两根 60min bar（同日共享同一日频因子）
+    minute = pd.DataFrame({
+        "时间": ["2026-01-06 10:30:00", "2026-01-06 11:30:00",
+                "2026-01-06 13:30:00", "2026-01-06 16:00:00"],
+        "开盘": [100.5] * 4, "收盘": [100.5, 100.6, 99.1, 99.2],
+        "最高": [100.8] * 4, "最低": [99.0] * 4,
+        "成交量": [100.0] * 4, "成交额": [10000.0] * 4,
+    })
+
+    def fake_request(func, *a, **k):
+        name = getattr(func, "__name__", "")
+        if name == "stock_hk_dividend_payout_em":
+            return ev
+        if name == "stock_hk_hist_min_em":
+            return minute
+        return daily
+    monkeypatch.setattr(f, "_request", fake_request)
+    out = f.get_kline("00700", start_date="2026-01-06", end_date="2026-01-06",
+                      period="60min", adjust="hfq", market_type="hk_stock")
+    assert out.attrs.get("dual_price") is True
+    assert out.attrs.get("adjust") == "hfq_self_built"
+    assert out.attrs.get("n_events_applied") == 1
+    assert out.attrs.get("lot_size") == 100
+    # 恒等式逐 bar：adj = raw × factor（当日折算因子）
+    dev = (out["close"] - out["raw_close"] * out["adj_factor"]).abs().max()
+    assert dev < 1e-10, f"分钟双价恒等式偏差 {dev}"
+    # 同日 bar 共享同一日频因子（prev_raw=除净日前日 close=100.0，div=1）
+    assert out["adj_factor"].nunique() == 1
+    assert float(out["adj_factor"].iloc[0]) == pytest.approx(100.0 / 99.0, abs=1e-9)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
