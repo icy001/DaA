@@ -827,6 +827,26 @@ class Backtester:
                  if a}
         if audit:
             result.meta["audit_warnings"] = audit
+        # 港股分钟线限制透传（v3.54 转正轮评审裁定）：历史深度受限与日完整性闸
+        # 剔除日必须进 meta 并在报告开头强制打印，禁止假装返回全期数据
+        minute_meta = {}
+        for s in self.symbols:
+            fa = getattr(self.frames.get(s), "attrs", {}) or {}
+            if fa.get("minute_history_capped"):
+                minute_meta[s] = {
+                    "minute_history_capped": True,
+                    "minute_available_from": fa.get("minute_available_from"),
+                    "dropped_trading_days": fa.get("dropped_trading_days") or [],
+                }
+        if minute_meta:
+            result.meta["minute_history_limit"] = minute_meta
+            for s, mm in minute_meta.items():
+                self.logger.warning(
+                    "[报告头] 港股分钟线当前仅支持最近1个月公开数据，历史按月滚动累积"
+                    "（%s minute_history_capped=True，实际起点 %s，完整性闸剔除 %d 日：%s）",
+                    s, mm.get("minute_available_from"),
+                    len(mm["dropped_trading_days"]),
+                    "、".join(mm["dropped_trading_days"]) or "无")
         result.run_mode = self.run_mode
         result.symbols = list(self.symbols)
         result.params = dict(strategy.params)

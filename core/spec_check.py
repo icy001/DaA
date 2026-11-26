@@ -33,6 +33,7 @@ VALUE_FINGERPRINT_KEYS = [
     "FUTURE_BENCHMARK_MAP",   # 期货基准映射（股指→全收益指数；禁止跨资产混用的值级守护）
     "LIVE_SAFETY",            # live_allowed_markets 白名单等实盘安全参数
     "HK_STOCK_CONFORMANCE",   # 港股标的规格（每手/价位分表/印花税豁免/事件源——值级口径）
+    "US_STOCK_CONFORMANCE",   # 美股治理面（事件源穷举/拆股线50%/费用口径/汇率——值级口径）
 ]
 
 

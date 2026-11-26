@@ -420,6 +420,19 @@ class DataFetcher:
             # 避免 qfq 文件名装 hfq_self_built/raw-only 内容造成口径错位
             # （与 cn_index 同构处理，v3.54 港股正式接入）
             adjust = "none"
+        if market in ("us_stock", "us_etf"):
+            # 美股事件源闸（评审 2026-11-26 裁定）必须挡在【路由之前】：
+            # DataRouter 适配器路径会绕过 _fetch_us_stock_daily 的出口闸
+            # （实测 AAPL 经 router 直连成功、TSLA 失败才落老链路——同一闸门
+            # 两种行为不可接受），穷举无事件源时禁止任何取数路径放行
+            us_conf = getattr(config, "US_STOCK_CONFORMANCE", {}) or {}
+            if not (us_conf.get("events_source") or {}) and str(
+                    us_conf.get("events_unavailable_action") or "raise") == "raise":
+                raise RuntimeError(
+                    f"美股 {symbol} 分红/拆股事件源缺失（四渠道穷举无公开免费"
+                    f"结构化事件源，治理面 events_source 为空），"
+                    f"events_unavailable_action=raise：禁止以 raw 或无事件 adj "
+                    "任何形式放行；待接入权威事件源后按治理面登记放行")
 
         if market in _ADJ_MARKETS:
             raw = self._get_raw_daily(market, symbol, start, end)
@@ -1681,6 +1694,20 @@ class DataFetcher:
 
 
     def _fetch_us_stock_daily(self, symbol, start, end, adjust):
+        # 事件源闸（评审 2026-11-26 裁定，与港股 ETF 同构 fail-closed）：
+        # 美股公开免费渠道无结构化分红/拆股事件源（穷举证据登记
+        # US_STOCK_CONFORMANCE），raw 序列带拆股跳变同样污染信号——
+        # 事件源接入前禁止取数/回测，禁止降级 raw-only 放行
+        conf = getattr(config, "US_STOCK_CONFORMANCE", {}) or {}
+        if not (conf.get("events_source") or {}):
+            action = str(conf.get("events_unavailable_action") or "raise")
+            if action == "raise":
+                raise RuntimeError(
+                    f"美股 {symbol} 分红/拆股事件源缺失（四渠道穷举无公开免费"
+                    f"结构化事件源，治理面 events_source 为空），"
+                    f"events_unavailable_action=raise：禁止以 raw 或无事件 adj "
+                    "任何形式放行；待接入权威事件源后按治理面登记放行")
+            raise ValueError(f"未知 events_unavailable_action: {action}")
         code = self._resolve_us_symbol(symbol)
         last_error = None
         for candidate in ([code] if code else []) + [f"{p}.{symbol.upper()}" for p in ("105", "106", "107")]:
@@ -2847,6 +2874,56 @@ class DataFetcher:
         self._save_cache(factors, path)
         return factors
 
+    def _hk_minute_day_gate(self, out: pd.DataFrame, period: str) -> pd.DataFrame:
+        """港股分钟线日 bar 数完整性闸（评审 2026-11-26 裁定，链路转正前置）。
+
+        逐交易日校验：
+          ① 标签合法性——60min 合法标签集 = {10:30, 11:30, 13:30, 14:30,
+             15:30, 16:00}（东财滚动口径实测，全日市必须 6 根）；其他周期
+             降级为时段窗口校验（bar 结束时刻 ∈ (9:30,12:00]∪(13:00,16:00]）；
+          ② 每日 bar 数 ≥2（半日市下限，评审口径）；
+          ③ 末端日 bar 数 < 全日标准根数 = 盘中未走完（is_complete 语义）剔除。
+        违规日自动剔除，日期列表写入 attrs["dropped_trading_days"] 持久化披露
+        （versioning 边车白名单），禁止静默喂入截断数据。
+        """
+        if out is None or out.empty:
+            return out
+        mins = int(period)
+        if mins == 60:
+            valid_labels = {1030, 1130, 1330, 1430, 1530, 1600}
+            full_n = 6
+        else:
+            valid_labels = None          # 未实测周期：降级为时段窗口校验
+            full_n = max(1, 270 // mins)  # 270 分钟交易时长理论根数
+        hm = out.index.hour * 100 + out.index.minute
+        if valid_labels is not None:
+            bad_label = ~hm.isin(valid_labels)
+        else:
+            in_window = ((hm > 930) & (hm <= 1200)) | ((hm > 1300) & (hm <= 1600))
+            bad_label = ~in_window
+        day = out.index.normalize()
+        drop_days = {d for d, bad in zip(day, bad_label) if bad}
+        counts = pd.Series(1, index=out.index).groupby(day).sum()
+        drop_days |= set(counts[counts < 2].index)          # 半日市下限 ≥2
+        last_day = day.max()
+        # 末端未走完（is_complete）仅判定「今天」：盘中拉取当日 bar 必然不足
+        # 全日根数；历史末端日 bar 数 <full_n 按半日市口径保留（截断由标签
+        # 合法性校验拦截——误剔历史日会把合成/短窗样本唯一交易日清空，
+        # 触发应交易日净空闸 raise，2026-11-26 预检合成帧实测）
+        if last_day == pd.Timestamp.now().normalize() \
+                and int(counts.loc[last_day]) < full_n:
+            drop_days.add(last_day)
+        if not drop_days:
+            return out
+        dropped = [str(d.date()) for d in sorted(drop_days)]
+        out = out[~day.isin(drop_days)].copy()
+        out.attrs["dropped_trading_days"] = dropped
+        self.logger.warning(
+            "[hk_stock] 分钟线日完整性闸剔除 %d 个交易日（截断标签/bar 数不足/"
+            "未走完）：%s（已写入 attrs.dropped_trading_days 持久化披露）",
+            len(dropped), "、".join(dropped))
+        return out
+
     def _fetch_minute(self, market, symbol, period, start, end) -> pd.DataFrame:
         """分钟线取数入口：可路由市场交给 DataRouter，其余保持原报错文案。"""
         if market in _SUPPORTED_MINUTE_MARKETS:
@@ -2892,6 +2969,8 @@ class DataFetcher:
                     "[hk_stock] %s %s 分钟历史深度受限：请求起点 %s，实际可用起点 %s"
                     "（东财接口仅保留约 1 个月分钟历史，缺口已标注 minute_history_capped）",
                     symbol, period, start, avail)
+            # 日 bar 数完整性闸（评审 2026-11-26 裁定：链路转正前置强制闸）
+            out = self._hk_minute_day_gate(out, str(period))
             return out
         if market == "cn_convertible":
             # akshare bond_zh_hs_cov_min 实走东财 K 线：成交量=手（1 手=10 张，实测比值 10.0）

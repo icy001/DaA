@@ -689,12 +689,16 @@ MARKETS = {
         "price_step": 0.01,
         "t_plus": 0,
         "trade_direction": ["long", "short"],
-        "commission_rate": 0,
-        "commission_min": 0,
-        "stamp_tax_rate_sell": 0,
-        "stamp_tax_rate_buy": 0,
+        # 零售券商默认费率（评审 2026-11-26 裁定口径，全部实测对账）：
+        # 佣金 0.0049 美元/股双边、单笔最低 0.99；SEC 费卖出单边 0.00278%；
+        # TAF 交易活动费卖出单边 0.000166 美元/股、单笔最低 0.01
+        "commission_per_share": 0.0049,
+        "commission_min": 0.99,
         "sec_fee_sell": 0.0000278,
         "taf_fee_sell": 0.000166,
+        "taf_min": 0.01,
+        "stamp_tax_rate_sell": 0,
+        "stamp_tax_rate_buy": 0,
         "margin_rate": 0.5,
         "leverage": 2.0,
         "pdt_min_equity": 25000,
@@ -992,6 +996,38 @@ HK_STOCK_CONFORMANCE = {
     # 波动日），字面 raise 会误拦全部真实波动，实测明细登记验收单 §六C.16
     "jump_audit": {"threshold": 0.05, "threshold_split": 0.25,
                    "action": "raise", "audit_band": "attrs_disclose"},
+}
+
+# 美股治理面（v3.54 美股日线预检轮，2026-11-26 评审裁定）
+US_STOCK_CONFORMANCE = {
+    "authoritative_source": "eastmoney stock_us_hist（公开免费接口）",
+    # 事件源穷举（2026-11-26 实测，四渠道均无公开免费结构化分红/拆股事件源）：
+    # ① akshare stock_us* 全列无 div/split 接口；② 东财 datacenter F10 美股
+    # 分红报表名穷举（RPT_USF10_MAIN_DIVBASIC 等 5 个）均「报表配置不存在」；
+    # ③ 雅虎 query1/query2 全部 403 IP 封锁（评审裁定放弃）；④ Nasdaq
+    # analyst dividends API 404。按裁定与港股 ETF 同构 fail-closed：
+    "events_source": {},                      # 穷举后登记为空（非缺省漏登）
+    "events_unavailable_action": "raise",     # 事件源缺失标的禁止取数/回测
+    # 跳变审计三级（预检裁定口径）：5% 事件日核验线保持不变；
+    # 拆股强制解释线放宽到 50%（适配美股高波动特性，评审裁定）
+    "jump_audit": {"threshold": 0.05, "threshold_split": 0.50,
+                   "action": "raise", "audit_band": "attrs_disclose"},
+    # 交易规则（评审裁定）：T+0、无整手限制（qty_step=1，不复用港股/A股整手）
+    "t_plus": 0,
+    "qty_step": 1,
+    # 费用基准声明（实现单源在 MARKETS["us_stock"]，此处登记裁定口径）：
+    # 佣金 0.0049 美元/股双边（单笔最低 0.99）+ SEC 费卖出 0.00278% +
+    # TAF 卖出 0.000166 美元/股（单笔最低 0.01）
+    "commission_per_share": 0.0049,
+    "commission_min": 0.99,
+    "sec_fee_sell": 0.0000278,
+    "taf_per_share": 0.000166,
+    "taf_min": 0.01,
+    # 计价货币 USD，权益折人民币按固定汇率 7.20（口径标 meta；动态汇率+
+    # 汇兑损益单列为非阻塞后续项）
+    "currency": "USD",
+    "fx_fixed_cny": 7.20,
+    "tz": "America/New_York",
 }
 
 def get_future_variety_params(symbol: str):
@@ -2636,6 +2672,7 @@ CONFIG_SURFACE = {
         "EMPTY_REASON_PROVENANCE", "SPEC_DRAFT_PERMISSION", "SUITE_COVERAGE_GUARD",
         "NONDETERMINISTIC_SCRIPT_GUARD", "ACCEPTANCE_GOVERNANCE", "SPEC_PROVENANCE",
         "CONFIG_SURFACE", "BACKTEST_DEFAULTS", "RISK", "HK_STOCK_CONFORMANCE",
+        "US_STOCK_CONFORMANCE",
     ],
     "surface_hash_algo": "sha256",
     "surface_hash_file": "config_surface.sha256",

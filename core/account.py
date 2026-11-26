@@ -334,12 +334,18 @@ class TradingAccount:
 
         if market in ("us_stock", "us_etf"):
             amount = price * volume
-            # SEC/TAF 只在「卖出」时收：开空卖出收，买入回补（buy/cover）不收
+            # 零售券商默认费率（评审 2026-11-26 裁定口径，US_STOCK_CONFORMANCE 登记）：
+            # 佣金 0.0049 美元/股双边（单笔最低 0.99）；
+            # SEC 费与 TAF 只在「卖出」时收（官方口径）：SEC 0.00278%、
+            # TAF 0.000166 美元/股（单笔最低 0.01）
+            comm = max(volume * float(rule.get("commission_per_share", 0) or 0),
+                       float(rule.get("commission_min", 0) or 0))
             if direction in ("sell", "short"):
                 sec = amount * float(rule.get("sec_fee_sell", 0) or 0)
-                taf = volume * float(rule.get("taf_fee_sell", 0) or 0)
-                return r2(sec + taf)
-            return 0.0
+                taf = max(volume * float(rule.get("taf_fee_sell", 0) or 0),
+                          float(rule.get("taf_min", 0) or 0))
+                return r2(comm + sec + taf)
+            return r2(comm)
 
         if market == "hk_stock":
             amount = price * volume

@@ -189,6 +189,7 @@ UNIFIED_AMOUNT_UNIT
 UNIFIED_VOLUME_UNIT
 UNIVERSE_RESOLUTION_GUARD
 UQER_TOKEN
+US_STOCK_CONFORMANCE
 VOL_MA
 VR
 WECHAT_WEBHOOK_KEY
@@ -269,6 +270,8 @@ cold_compress
 command_file_globs
 command_modules_dir
 comment_and_blank_lines_excluded
+commission_min
+commission_per_share
 compare_baseline_dump_per_version_required
 compare_requires_same_algo_id
 compare_requires_same_spec_version
@@ -294,6 +297,7 @@ count_unit_enum
 create_at
 cross_version_compare_action
 crypto
+currency
 current_below_peak_must_carry_recovery_plan
 current_constituents_audit
 curve_is_disclosure_if_external
@@ -401,6 +405,7 @@ frequent_order_warning_ratio
 frozen_counts_are_outputs_not_criteria
 functions
 future
+fx_fixed_cny
 gate_module
 gate_single_source
 get_index_members_must_call_classify_first
@@ -610,6 +615,7 @@ push_must_tag_gated
 push_requires_fresh
 pytest_side_and_script_side_both_required
 qii_product
+qty_step
 range
 raw_dir
 readme_must_mark_unimplemented
@@ -661,6 +667,7 @@ script_hash_change_requires_changelog
 script_hash_locked
 script_hash_self_sync_forbidden
 scripts
+sec_fee_sell
 segment_decision_examples
 self_lockout_exemption_is_enumerated
 self_lockout_exemption_modes
@@ -722,7 +729,10 @@ surface_hash_file
 surface_recurse_blocks
 surface_scope
 system_test
+t_plus
 t_plus_one_enforce
+taf_min
+taf_per_share
 tag_research_use
 teaching_mode
 test_alpha101.py
@@ -739,6 +749,7 @@ tolerance
 tooling
 tried_entry_schema
 tried_must_include_empty_sources
+tz
 unit
 unit_invariant_by_asset_class
 universe_egress_points

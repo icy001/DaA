@@ -78,6 +78,9 @@ _PERSIST_ATTR_KEYS = frozenset({
     # v3.54 港股接入修订轮（评审裁定）：跳变审计带无事件大波动日明细随帧
     # 持久化——缓存命中后审计信息不蒸发，回测报告 meta.audit_warnings 同源
     "audit_warnings",
+    # v3.54 港股分钟线转正轮（评审裁定）：日 bar 数完整性闸剔除的交易日列表
+    # 随帧持久化披露，禁止静默喂入截断数据
+    "dropped_trading_days",
 })
 
 

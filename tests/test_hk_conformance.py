@@ -292,6 +292,8 @@ def test_hk_60min_dual_price_synthetic(monkeypatch):
             return minute
         return daily
     monkeypatch.setattr(f, "_request", fake_request)
+    # 缓存隔离（测试幂等硬约束）：禁止合成帧写入分钟缓存污染后续真实取数
+    monkeypatch.setattr(f, "_save_cache", lambda *a, **k: None)
     out = f.get_kline("00700", start_date="2026-01-06", end_date="2026-01-06",
                       period="60min", adjust="hfq", market_type="hk_stock")
     assert out.attrs.get("dual_price") is True
