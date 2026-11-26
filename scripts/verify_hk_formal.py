@@ -47,22 +47,19 @@ except Exception as e:
     print(f"   [FAIL] {e}")
     traceback.print_exc()
 
-# ---------- B) 02800 raw-only ----------
+# ---------- B) 02800 事件源缺失 → 彻底 raise（评审 2026-11-26 收紧裁定） ----------
 print("=" * 70)
-print("B) 02800 日线 2020-01-01~2026-11-26（治理面 events_source=None → reject_adj）")
+print("B) 02800 日线请求（治理面 events_source=None → raise，禁止任何形式放行）")
 try:
-    df8 = f.get_daily("02800", market_type="hk_stock",
-                      start_date="2020-01-01", end_date="2026-11-26")
-    print(f"   行数={len(df8)}  attrs={ {k: v for k, v in df8.attrs.items()} }")
-    assert df8.attrs.get("events_source") == "unavailable", "必须标注事件源不可用"
-    assert df8.attrs.get("dual_price") is False, "02800 必须 raw-only"
-    assert df8.attrs.get("adjust") == "none", "主列必须保持 raw（禁止黑箱复权）"
-    assert "raw_close" not in df8.columns, "raw-only 模式主列即 raw，不应再有 raw_* 重复列"
-    print("   [PASS] 02800 raw-only 出口（fail-closed 标注，非黑箱降级）")
-except Exception as e:
+    f.get_daily("02800", market_type="hk_stock",
+                start_date="2020-01-01", end_date="2026-11-26")
+    print("   [FAIL] 02800 未被拒绝（双价闸被绕过——事件不全的标的不得跑回测）")
     ok = False
-    print(f"   [FAIL] {e}")
-    traceback.print_exc()
+except Exception as e:
+    msg = str(e)
+    print(f"   [PASS] fail-closed 拒绝：{msg[:150]}")
+    assert ("02800 分红事件源缺失" in msg) or ("事件源" in msg and "raise" in msg), \
+        f"拦截原因不符合事件源缺失语义: {msg}"
 
 # ---------- C) 跳变审计 ----------
 print("=" * 70)

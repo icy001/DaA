@@ -1697,6 +1697,19 @@ class DataFetcher:
         events_registry = {str(k).zfill(5): v for k, v in
                            (conf.get("events_source") or {}).items()}
         stamp_exempt = {str(x).zfill(5) for x in (conf.get("stamp_duty_exempt") or [])}
+        src_name = events_registry.get(code)
+        # 评审 2026-11-26 裁定（收紧）：事件源缺失的标的【彻底拒绝取数】——
+        # raw 序列带除净跳变同样污染信号，事件不全的标的禁止跑回测，
+        # 待补 ETF 分红事件源后再放行（fail-closed，不是 bug）
+        if src_name is None:
+            action = str(conf.get("events_unavailable_action") or "raise")
+            if action == "raise":
+                raise RuntimeError(
+                    f"港股 {code} 分红事件源缺失（治理面 events_source 未登记），"
+                    f"无法构建双价序列：events_unavailable_action=raise，"
+                    "禁止以 raw 或无事件 adj 任何形式放行；"
+                    "待补权威 ETF 事件源后按治理面登记放行")
+            raise ValueError(f"未知 events_unavailable_action: {action}")
         # 原始价固定 adjust=""（禁止消费数据源黑箱复权价；v3.54 港股接入）
         try:
             raw = self._request(ak.stock_hk_hist, symbol=code, period="daily",
@@ -1712,7 +1725,6 @@ class DataFetcher:
                                    market="hk_stock", symbol=code).loc[start:end]
         # 自建双价（事件表独立因子，与 A 股/期货双价体系同构）：
         #   adj = raw × factor（信号/收益/权益），raw_* 列（撮合/费用/成交记录）
-        src_name = events_registry.get(code)
         factor = pd.Series(1.0, index=df.index)
         n_events = 0
         if src_name == "em_stock_hk_dividend_payout_em":
@@ -1722,7 +1734,7 @@ class DataFetcher:
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(
                     f"港股 {code} 事件源 em_stock_hk_dividend_payout_em 获取失败："
-                    f"{exc}（治理面 events_unavailable_action=reject_adj，"
+                    f"{exc}（治理面 events_unavailable_action=raise，"
                     "禁止静默按零事件生成 adj 序列）") from exc
             cum = 1.0
             # 修复记录（v3.54 港股接入冒烟）：原写法 (ev or pd.DataFrame()) 对
@@ -1746,36 +1758,47 @@ class DataFetcher:
                 cum *= prev_raw / (prev_raw - div)
                 factor[factor.index >= exd] = cum
                 n_events += 1
-        # 跳变审计：|隔夜|>阈值 必须有事件解释（拆股/大额分派），否则拒绝
-        # （00700 2014-05-29 一拆五 −78.64% 实证：跨拆股段禁止静默生成 adj）
+                # ---- 事件日核验线（裁定阈值 5%）：事件日 raw 隔夜跳变必须能被
+                # 该事件解释（实际跳变 ≈ 预期除净幅度，残差 ≥5% 即事件表与价格
+                # 矛盾——漏登/错登/日期错位在此被抓出）----
+                audit_thr = float((conf.get("jump_audit") or {}).get("threshold") or 0.05)
+                actual = float(df["close"].iloc[pos]) / prev_raw - 1.0
+                expected = -div / prev_raw
+                if abs(actual - expected) >= audit_thr:
+                    raise JumpAuditError(
+                        f"港股 {code} 事件日 {exd.date()} 核验失败：事件表登记派息 "
+                        f"{div} HKD（预期除净幅度 {expected:+.2%}），"
+                        f"实际 raw 隔夜跳变 {actual:+.2%}，残差 "
+                        f"{abs(actual - expected):.2%} ≥ {audit_thr:.0%}"
+                        "——事件表与价格矛盾，禁止生成 adj 序列（jump_audit.threshold）")
+        # ---- 跳变审计（拆股强制解释线 25% + 无事件审计带 5%~25%）----
+        # 25%：拆股/合股物理下界（2014 一拆五 -78.64% 实证），无事件解释必 raise；
+        # 5%~25%：实测与真实个股波动数学不可分（00700 全期 68 日，含 2026-06-02
+        # +10.46% 等 8 个 ≥10% 真实波动日），逐日写入 attrs.unexplained_jumps
+        # 审计披露（不静默、不拦截），明细登记验收单 §六C.16
         audit = conf.get("jump_audit") or {}
-        thr = float(audit.get("threshold") or 0.25)
+        thr_split = float(audit.get("threshold_split") or 0.25)
+        thr_audit = float(audit.get("threshold") or 0.05)
         adj_close = df["close"] * factor
+        event_days = set()
+        for idx in df.index:
+            if float(factor.loc[idx]) != float(factor.iloc[max(df.index.get_loc(idx) - 1, 0)]) \
+                    and df.index.get_loc(idx) > 0:
+                event_days.add(idx)
         jumps = adj_close.pct_change().abs()
-        unexplained = jumps[jumps > thr]
-        if len(unexplained) and str(audit.get("action") or "raise") == "raise":
-            first = unexplained.index[0]
+        not_event = pd.Series([i not in event_days for i in jumps.index],
+                              index=jumps.index)
+        unexplained_split = jumps[(jumps >= thr_split) & not_event]
+        if len(unexplained_split) and str(audit.get("action") or "raise") == "raise":
+            first = unexplained_split.index[0]
             raise JumpAuditError(
-                f"港股 {code} 序列存在无事件解释的 {thr:.0%} 以上跳变"
+                f"港股 {code} 序列存在无事件解释的 {thr_split:.0%} 以上跳变"
                 f"（首例 {first.date()} {float(jumps.loc[first]):+.2%}）："
                 "事件表不含对应拆股/分派记录，禁止生成被污染的 adj 序列"
-                "（jump_audit.action=raise）")
-        if src_name is None and n_events == 0:
-            # 无事件源标的（02800）：events_unavailable_action=reject_adj——
-            # 禁止生成 adj 双价序列，主列保持 raw 并强制标注（fail-closed）
-            if str(conf.get("events_unavailable_action") or "reject_adj") == "reject_adj":
-                df.attrs.update({
-                    "events_source": "unavailable",
-                    "dual_price": False,
-                    "adjust": "none",
-                    "adjust_reason": (f"{code} 分派事件源不可达（6 渠道实测），"
-                                      "治理面禁止 adj 序列；主列=raw 原始价"),
-                })
-            df.attrs["lot_size"] = self.get_hk_lot_size(code)
-            df.attrs["stamp_duty_exempt"] = code in stamp_exempt
-            df.attrs["price_adjust"] = "none"
-            df.attrs["currency"] = "HKD"
-            return df
+                f"（jump_audit.threshold_split={thr_split}）")
+        band = jumps[(jumps >= thr_audit) & (jumps < thr_split) & not_event]
+        # 双价构建（adj 主列 + raw_* 列 + 因子列；修复记录：上轮重写时误删此段
+        # 致 KeyError raw_close，已补回）
         for c in ("open", "high", "low", "close"):
             df[f"raw_{c}"] = df[c]
             df[c] = df[c] * factor
@@ -1790,6 +1813,15 @@ class DataFetcher:
             "stamp_duty_exempt": code in stamp_exempt,
             "currency": "HKD",
         })
+        if len(band):
+            # 无事件审计带（5%~25%）：逐日审计披露（attrs，随边车不持久化大列表——
+            # 只落日志与回执；实测该带与真实波动不可分，禁止静默）
+            detail = "、".join(f"{d.date()} {float(v):+.2%}"
+                               for d, v in band.items())
+            self.logger.warning(
+                "[hk_stock] %s 无事件审计带 %d 日（%.0f%%~%.0f%%，未拦截，"
+                "与真实波动不可分——明细须入回执）：%s",
+                code, len(band), thr_audit, thr_split, detail)
         return df
 
     def _fetch_cn_cb_daily(self, symbol, start, end, adjust):

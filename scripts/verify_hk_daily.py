@@ -1,19 +1,15 @@
 # -*- coding: utf-8 -*-
-"""港股日线全期验证（v3.54 正式接入，验收单 §六C.15，可复现脚本）。
+"""港股日线全期验证（v3.54 正式接入修订轮，验收单 §六C.16，可复现脚本）。
 
-2020-01-01~今 02800+00700 日线，双标的分仓回测（每手不同：02800=500、
-00700=100，策略 lot_size 为单值参数，组合混合每手会互相污染单量取整，
-故按标的各自回测、闸门逐标的出具——与期货单序列模式同构）。
-
-口径：02800 raw-only（治理面 events_source=None → reject_adj，信号用 raw，
-02800 全历史 >4% 隔夜跳变全为宏观暴跌日、无大额分派，预检已实证）；
-00700 自建双价（东财事件表 22 条分红，7 条落在回测区间生效）。
+评审 2026-11-26 收紧裁定：02800（事件源缺失）彻底 raise——事件不全的标的
+禁止跑回测（撤销 raw-only 放行），本脚本验证该 fail-closed 行为 + 00700
+2020-01-01~今 日线全期七闸门（lot=100，自建双价，东财事件表 22 条分红）。
 同冻结参数 double_ma_cross（策略 meta 默认，未调参——策略冻结纪律）。
 
 七闸门：
   1) LookaheadError = 0（引擎未来函数断言全程未触发）
   2) 信号出口对账：signal_gate 决策日志数 = 成交数 + 拒单数（出口唯一）
-  3) 双价恒等式：close = raw_close × adj_factor 全帧逐位（02800 raw-only 豁免）
+  3) 双价恒等式：close = raw_close × adj_factor 全帧逐位
   4) 每手整手闸生效：成交记录股数全部为每手整数倍
   5) 费用非零：逐笔手续费 > 0 且费率口径 = MARKETS['hk_stock'] 真实费率
   6) 风控不误拦：拒单分类计数披露，黑天鹅/熔断触发数如实列示
@@ -37,9 +33,8 @@ from core.backtester import Backtester
 from core.data_fetcher import DataFetcher
 from strategies.double_ma_cross import DoubleMACross
 
+# 功能性适配（每手 100，order_value 4 万 = 1 手 00700），非绩效调参
 TARGETS = {
-    # symbol: (lot_size, order_value HKD)  — 功能性适配（每手不同），非绩效调参
-    "02800": {"lot_size": 500, "order_value": 12500.0},
     "00700": {"lot_size": 100, "order_value": 40000.0},
 }
 
@@ -58,6 +53,24 @@ def run_one(symbol: str, start: str, end: str, fetcher: DataFetcher) -> tuple:
     return bt, result
 
 
+def verify_02800_rejected(fetcher: DataFetcher) -> bool:
+    """02800 事件源缺失 → 必须彻底 raise（评审收紧裁定：事件不全的标的不得跑回测）。"""
+    print("=" * 68)
+    print("02800 事件源缺失 fail-closed 验证（预期：拒绝取数，禁止任何形式放行）")
+    try:
+        fetcher.get_daily("02800", market_type="hk_stock",
+                          start_date="2020-01-01", end_date="2026-11-26")
+        print("❌ 02800 未被拒绝（双价闸被绕过）")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if "02800 分红事件源缺失" in msg or ("事件源" in msg and "raise" in msg):
+            print(f"✅ 0) 02800 彻底拒绝（fail-closed 正确行为，非 bug）：{msg[:120]}")
+            return True
+        print(f"❌ 0) 拦截原因不符合事件源缺失语义：{msg[:150]}")
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true", help="冒烟口径（2025-06 起）")
@@ -68,6 +81,11 @@ def main() -> int:
     fetcher = DataFetcher()
     all_ok = True
     anomaly_table = []   # 异常表：0 条也写 0
+
+    # 0) 02800 fail-closed 前置验证（事件源缺失彻底 raise）
+    if not verify_02800_rejected(fetcher):
+        anomaly_table.append("02800 事件源缺失未被彻底拒绝（双价闸被绕过）")
+        all_ok = False
 
     for symbol in TARGETS:
         t0 = time.time()

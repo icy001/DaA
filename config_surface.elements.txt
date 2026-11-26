@@ -1,3 +1,5 @@
+00700
+02800
 A
 ACCEPTANCE_GOVERNANCE
 ADJ_FACTOR_DIR
@@ -71,9 +73,11 @@ FACTOR_CACHE_DIR
 FAIL_CLOSED_NOTE
 FOREX
 FUTURES_AMOUNT_NOT_APPLICABLE
+FUTURE_BENCHMARK_MAP
 GATE_CONFORMANCE
 GLOBAL_FUTURES
 HIST_VOL
+HK_STOCK_CONFORMANCE
 IBKR_CLIENT_ID
 IBKR_HOST
 IBKR_PORT
@@ -194,6 +198,7 @@ abnormal_order_reject
 acceptance_ledger_must_cover_all_globs
 accepted_patterns
 account
+action
 adapters_implement_primitives_only
 adj_factors_dir
 adjust
@@ -207,11 +212,14 @@ allowed_sources
 archive_by_month
 artifact_group
 atomic_write
+audit_band
 authoritative
+authoritative_source
 authority
 auto_send_requires_fresh
 b
 backtest
+bands
 banner_sticky
 bar_offset
 bare_numeric_conflict
@@ -336,6 +344,8 @@ entry
 entry_field
 enumerate_all_universe_callers
 eval_prefix
+events_source
+events_unavailable_action
 evidence_source_independence_required
 evidence_source_must_be_independent
 evidence_source_upstream
@@ -399,6 +409,8 @@ golden_vector_must_cover
 golden_vector_must_match_action
 guard_at
 guard_block_name_pattern
+halt_recover_enabled
+halt_recover_stabilize_days
 hand_typed_expected_forbidden
 hash_algo
 hash_ledger_append_only
@@ -435,6 +447,7 @@ iv_bounds
 iv_max_iter
 iv_solver
 iv_tol
+jump_audit
 keep_container_key
 key
 kill_switch_persist
@@ -458,6 +471,7 @@ liquidity_min_amount
 listing_probe_source
 listing_probe_unavailable_must_raise
 live
+live_allowed_markets
 live_reject_if_last_bar_in_warmup
 live_sim
 local_fallback_must_declare_today_missing
@@ -465,6 +479,7 @@ local_fallback_must_exist
 local_selfauthored_is_draft
 log_rotation_must_not_drop_live_records
 lookahead_safe
+lot_sizes
 manifest
 map_scope_mismatch_action
 map_scope_must_equal_supported_scope
@@ -560,6 +575,8 @@ on_violation
 order
 order_port
 paper
+part_a
+part_d_measured
 pdf_export_optional
 peak_evidence_file
 peak_evidence_schema
@@ -669,6 +686,7 @@ snapshot_evict_requires_no_refs
 snapshot_format
 snapshot_retention_days
 snapshots_dir
+source
 source_dependent_checks
 source_health_file
 source_interface_map
@@ -676,6 +694,9 @@ source_level_failure_counts_regardless
 source_timeout_seconds
 spec_authority_single_source
 spec_hash_authority
+spread_parts
+spread_tables
+stamp_duty_exempt
 static_fallback
 stats_default_filter
 stats_include_incomplete_flag
@@ -710,6 +731,8 @@ test_factor.py
 test_loader.py
 test_must_be_table_driven
 thin_entry
+threshold
+threshold_split
 today_missing_field
 tokenless_sources_first
 tolerance
@@ -721,10 +744,13 @@ unit_invariant_by_asset_class
 universe_egress_points
 universe_resolution_single_source
 unknown_empty_reason_must_raise
+unknown_lot_action
 unknown_mode_action
+unknown_spread_part_action
 unknown_token
 unknown_unit_combo_must_raise
 unlisted_guard_block_action
+unmeasured_action
 unrecognized_token_is_not_code
 unregistered_script_action
 upper_bound_must_be_offline_computable

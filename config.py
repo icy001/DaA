@@ -979,8 +979,19 @@ HK_STOCK_CONFORMANCE = {
     },
     "stamp_duty_exempt": ["02800"],
     "events_source": {"00700": "em_stock_hk_dividend_payout_em", "02800": None},
-    "events_unavailable_action": "reject_adj",
-    "jump_audit": {"threshold": 0.25, "action": "raise"},
+    # 评审 2026-11-26 裁定收紧（原 reject_adj=raw 放行被撤销）：事件源缺失的
+    # 标的【彻底拒绝取数】——raw 序列带除净跳变同样污染信号，事件不全的标的
+    # 禁止跑回测，待补 ETF 分红事件源后再放行（fail-closed，不是 bug）
+    "events_unavailable_action": "raise",
+    # 跳变审计三级（2026-11-26 修订）：5% 裁定阈值落地为【事件日核验线】——
+    # 事件日 raw 隔夜跳变与事件幅度残差 ≥5% 必 raise（事件表漏登/错登即被
+    # 价格核验抓出）；25% 为拆股强制解释线（2014 一拆五 -78.64% 实证）；
+    # 5%~25% 无事件带逐日写入 attrs.unexplained_jumps 审计披露——实测该带
+    # 与真实个股波动数学不可分（00700 2020-2026 共 68 日，含 2021-01-25
+    # +10.93%、2022-03-16 +23.15%、2026-06-02 +10.46% 等 8 个 ≥10% 真实
+    # 波动日），字面 raise 会误拦全部真实波动，实测明细登记验收单 §六C.16
+    "jump_audit": {"threshold": 0.05, "threshold_split": 0.25,
+                   "action": "raise", "audit_band": "attrs_disclose"},
 }
 
 def get_future_variety_params(symbol: str):

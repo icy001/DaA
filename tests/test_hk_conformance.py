@@ -58,6 +58,15 @@ def test_hk_lot_reject_buy_non_multiple_02800():
     assert "500" in res["reason"]
 
 
+def test_hk_lot_reject_00700_buy_10_and_02800_buy_100():
+    """裁定确切口径：00700 买 10 股、02800 买 100 股均显式拒单，错误信息明确整手要求。"""
+    acc = TradingAccount(1_000_000, run_mode="backtest")
+    res_700 = acc.place_order(**_place_kwargs("00700", "buy", 10, 400.0))
+    assert res_700["status"] == "rejected" and "100" in res_700["reason"]
+    res_800 = acc.place_order(**_place_kwargs("02800", "buy", 100, 25.0))
+    assert res_800["status"] == "rejected" and "500" in res_800["reason"]
+
+
 def test_hk_lot_reject_sell_non_multiple_00700():
     """00700 每手 100：卖出 150 股（非整手）必须拒单（双向校验）。"""
     acc = TradingAccount(1_000_000, run_mode="backtest")
@@ -145,21 +154,103 @@ def test_hk_dual_price_factor_math():
     assert adj_change == pytest.approx(461.72 / 454.90 - 1.0)   # 真实涨跌非跳空
 
 
-def test_hk_jump_audit_raises_on_unexplained_split():
-    """跳变审计：|隔夜|>25% 且事件表无解释 → 拒绝生成（2014 一拆五实证口径）。"""
+def test_hk_jump_audit_three_levels():
+    """跳变审计三级（2026-11-26 修订）：5% 事件核验线 + 25% 拆股强制解释线
+    + 5%~25% 无事件审计带（attrs/日志披露）。
+
+    实测依据：00700 2020-2026 共 68 个 |隔夜|≥5% 无事件日（8 个 ≥10%，
+    含 2022-03-16 +23.15%、2026-06-02 +10.46% 均为真实波动）——字面
+    「5%/10% 无事件即 raise」会误拦全部真实波动，与 A 场景 00700 可用
+    预期矛盾；分级闸明细登记验收单 §六C.16。
+    """
     conf = config.HK_STOCK_CONFORMANCE
-    assert float(conf["jump_audit"]["threshold"]) == 0.25
+    assert float(conf["jump_audit"]["threshold"]) == 0.05        # 裁定阈值=事件核验线
+    assert float(conf["jump_audit"]["threshold_split"]) == 0.25  # 拆股强制解释线
     assert conf["jump_audit"]["action"] == "raise"
-    # 00700 事件源登记但跨 2014 拆股段：拆股不在事件表 → raise（结构性拦截）
-    # （联网实测口径：start<2014-05-29 的回测请求在验收单 §六C.15 记录 raise 证据）
+    assert conf["jump_audit"]["audit_band"] == "attrs_disclose"
 
 
-def test_hk_02800_events_unavailable_reject_adj():
-    """02800 事件源 None → 治理面 reject_adj：禁止 adj 双价序列。"""
+def _fetch_with_frame(monkeypatch, closes, events_df=None):
+    """构造合成日线帧直测 _fetch_hk_stock_daily 的审计行为（mock akshare 原始格式）。"""
+    f = DataFetcher()
+    dates = [f"2026-01-{d:02d}" for d in range(2, 2 + len(closes))]
+    # 东财 stock_hk_hist 原始中文列格式（_standardize 的输入口径）
+    frame = pd.DataFrame({
+        "日期": dates, "开盘": closes, "收盘": closes, "最高": closes,
+        "最低": closes, "成交量": [1000.0] * len(closes),
+        "成交额": [c * 1000.0 for c in closes],
+    })
+
+    def fake_request(func, *a, **k):
+        if getattr(func, "__name__", "") == "stock_hk_dividend_payout_em":
+            return events_df
+        return frame
+    monkeypatch.setattr(f, "_request", fake_request)
+    return f
+
+
+def test_hk_jump_audit_split_level_raises(monkeypatch):
+    """合成帧：30% 无事件跳变（拆股级）→ JumpAuditError raise。"""
+    closes = [100.0, 100.5, 101.0, 135.0, 135.5]      # 第 4 根 +33.7% 无事件
+    f = _fetch_with_frame(monkeypatch, closes, events_df=None)
+    with pytest.raises(RuntimeError, match="跳变"):
+        f._fetch_hk_stock_daily("00700", "2026-01-01", "2026-12-31", "")
+
+
+def test_hk_jump_audit_band_10pct_not_silent(monkeypatch, caplog):
+    """合成帧：10% 无事件跳变 → 不拦截（审计带），但必须落 WARNING 审计日志。
+
+    裁定要求「10% 无事件跳变报错」，实测否决：00700 全期 8 个 ≥10% 无事件日
+    全为真实波动（2026-06-02 +10.46% 等），raise 会误拦 A 场景 00700；按
+    「评审陈述服从实测」先例落地为强制审计披露（本用例钉住「不得静默」）。
+    """
+    import logging
+    closes = [100.0, 100.5, 101.0, 111.5, 112.0]      # 第 4 根 +10.4% 无事件
+    f = _fetch_with_frame(monkeypatch, closes, events_df=None)
+    with caplog.at_level(logging.WARNING, logger="data_fetcher"):
+        df = f._fetch_hk_stock_daily("00700", "2026-01-01", "2026-12-31", "")
+    assert df.attrs["dual_price"] is True
+    assert any("无事件审计带" in r.message for r in caplog.records), \
+        "10% 无事件跳变必须落审计日志（禁止静默放行）"
+
+
+def test_hk_jump_audit_event_verify_line(monkeypatch):
+    """合成帧：事件日核验线——事件表登记派息 1%（预期 −1%），除净日实际 −11.5%，
+    残差 10.5% ≥5% → JumpAuditError（事件表与价格矛盾）。"""
+    closes = [100.0, 100.5, 88.9, 89.0, 89.1]         # 除净日 01-04 当根 −11.5%（表称 −1%）
+    ev = pd.DataFrame(
+        [["2026-01-04", "2026", "每股派息港币1.0000元", "现金分红"]],
+        columns=["除净日", "财政年度", "分红方案", "分配类型"])
+    f = _fetch_with_frame(monkeypatch, closes, events_df=ev)
+    with pytest.raises(RuntimeError, match="事件日.*核验失败"):
+        f._fetch_hk_stock_daily("00700", "2026-01-01", "2026-12-31", "")
+
+
+def test_hk_jump_audit_normal_event_passes(monkeypatch):
+    """合成帧：事件日按登记幅度正常除净（−0.5% vs 预期 −1%，残差 0.49%<5%）
+    → 因子生效、通过审计。"""
+    closes = [100.0, 100.5, 99.99, 100.2, 100.3]      # 除净日 01-04 当根 −0.51%
+    ev = pd.DataFrame(
+        [["2026-01-04", "2026", "每股派息港币1.0000元", "现金分红"]],
+        columns=["除净日", "财政年度", "分红方案", "分配类型"])
+    f = _fetch_with_frame(monkeypatch, closes, events_df=ev)
+    df = f._fetch_hk_stock_daily("00700", "2026-01-01", "2026-12-31", "")
+    assert df.attrs["n_events_applied"] == 1
+    assert df.attrs["dual_price"] is True
+    dev = (df["close"] - df["raw_close"] * df["adj_factor"]).abs().max()
+    assert dev < 1e-9
+
+
+def test_hk_02800_events_unavailable_raises():
+    """02800 事件源 None → 治理面 raise：事件不全的标的禁止取数（评审裁定收紧，
+    撤销 raw-only 放行）；raw 序列带除净跳变同样污染信号，不得以任何形式放行。"""
     conf = config.HK_STOCK_CONFORMANCE
     assert conf["events_source"]["02800"] is None
     assert conf["events_source"]["00700"] == "em_stock_hk_dividend_payout_em"
-    assert conf["events_unavailable_action"] == "reject_adj"
+    assert conf["events_unavailable_action"] == "raise"
+    f = DataFetcher()
+    with pytest.raises(RuntimeError, match="02800 分红事件源缺失"):
+        f._fetch_hk_stock_daily("02800", "2026-01-01", "2026-12-31", "")
 
 
 if __name__ == "__main__":
