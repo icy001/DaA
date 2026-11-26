@@ -32,6 +32,7 @@ VALUE_FINGERPRINT_KEYS = [
     "CN_FUTURES_VARIETY",     # 期货合约规格（乘数/保证金率/tick/涨跌停/开平平今费率——值级口径）
     "FUTURE_BENCHMARK_MAP",   # 期货基准映射（股指→全收益指数；禁止跨资产混用的值级守护）
     "LIVE_SAFETY",            # live_allowed_markets 白名单等实盘安全参数
+    "HK_STOCK_CONFORMANCE",   # 港股标的规格（每手/价位分表/印花税豁免/事件源——值级口径）
 ]
 
 

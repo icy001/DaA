@@ -343,7 +343,13 @@ class TradingAccount:
 
         if market == "hk_stock":
             amount = price * volume
-            etf = HK_ETF_CODES.__contains__(str(symbol)) if is_etf is None else bool(is_etf)
+            # 港股印花税按【标的】官方 Stamp Duty 列（HK_STOCK_CONFORMANCE.
+            # stamp_duty_exempt：02800 ETF 豁免、00700 正股应税双边 0.1%）；
+            # is_etf 参数仅作回退展示，治理面优先（v3.54 港股接入修正：
+            # 旧口径对 hk 全市场一刀切豁免与 HKEX 官方矛盾）
+            conf = getattr(config, "HK_STOCK_CONFORMANCE", {}) or {}
+            exempt = {str(x).zfill(5) for x in (conf.get("stamp_duty_exempt") or [])}
+            etf = str(symbol).zfill(5) in exempt
             comm = max(amount * float(rule.get("commission_rate", 0.0003)),
                        float(rule.get("commission_min_hkd", 3)))
             stamp = 0.0 if etf else max(math.ceil(amount * float(rule.get("stamp_tax_rate_buy", 0.001))),
@@ -631,12 +637,45 @@ class TradingAccount:
                 return self._reject(
                     symbol, direction,
                     f"可用持仓不足：可卖 {pos.available:g} / 请求 {volume:g}{t1}", market=market)
+            # 港股卖出同样整手（v3.54 港股接入：评审裁定「非整手必须拒单」双向）
+            if market == "hk_stock":
+                conf = getattr(config, "HK_STOCK_CONFORMANCE", {}) or {}
+                lots = {str(k).zfill(5): int(v) for k, v in
+                        (conf.get("lot_sizes") or {}).items()}
+                lot = lots.get(str(symbol).zfill(5))
+                if lot is not None and abs(volume / lot - round(volume / lot)) > 1e-9:
+                    return self._reject(
+                        symbol, direction,
+                        f"港股卖出数量必须是每手 {lot} 股的整数倍（当前 {volume:g}）",
+                        market=market)
         elif kind == "spot" and side == "long":
             step = float(rule.get("qty_step") or rule.get("min_qty") or 1)
             if abs(volume / step - round(volume / step)) > 1e-9:
                 return self._reject(symbol, direction,
                                     f"{rule.get('name', market)} 买入数量必须是 {step:g} 的整数倍"
                                     f"（当前 {volume:g}）", market=market)
+            # 港股整手闸（v3.54 港股接入）：每手股数是【标的属性】（HK_STOCK_
+            # CONFORMANCE.lot_sizes，HKEX 官方：02800=500、00700=100）；买卖
+            # 双向都必须整手，非整手显式拒单（禁止静默向下取整成交）；
+            # 未登记标的按 unknown_lot_action=reject（禁止按 100 凭记忆放行）
+            if market == "hk_stock":
+                conf = getattr(config, "HK_STOCK_CONFORMANCE", {}) or {}
+                lots = {str(k).zfill(5): int(v) for k, v in
+                        (conf.get("lot_sizes") or {}).items()}
+                lot = lots.get(str(symbol).zfill(5))
+                if lot is None:
+                    if str(conf.get("unknown_lot_action") or "reject") == "reject":
+                        return self._reject(
+                            symbol, direction,
+                            f"港股 {symbol} 每手股数未在治理面登记"
+                            "（HK_STOCK_CONFORMANCE.lot_sizes）：禁止按默认"
+                            " 100 凭记忆放行，须实测登记后下单", market=market)
+                    lot = 100
+                if abs(volume / lot - round(volume / lot)) > 1e-9:
+                    return self._reject(
+                        symbol, direction,
+                        f"港股下单数量必须是每手 {lot} 股的整数倍"
+                        f"（当前 {volume:g}，非整手禁止成交）", market=market)
         elif kind == "future":
             lot_step = float(rule.get("lot_step", 1) or 1)
             if abs(volume / lot_step - round(volume / lot_step)) > 1e-9:

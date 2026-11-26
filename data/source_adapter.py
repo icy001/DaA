@@ -598,6 +598,11 @@ class DataRouter:
                 errors.append((name, exc))
                 continue
             except Exception as exc:  # noqa: BLE001 - 单源失败必须切换
+                if type(exc).__name__ == "JumpAuditError":
+                    # 口径结构性拒绝（港股跳变审计）：不是「这个源坏了」，换源重试
+                    # 只会得到同一份被拆股污染的历史；必须直接向闸门传播，
+                    # 禁止聚合进「全部远程源失败」被 stale 缓存兜底吞成 fail-open
+                    raise
                 if "该市场当前无可用数据源" in str(exc):
                     # 老链路抛的是 RuntimeError，文案同义：同样按市场级不可用处理
                     logger.warning("[router] %s 对 [%s] 判定市场不可用：%s", name, market, exc)

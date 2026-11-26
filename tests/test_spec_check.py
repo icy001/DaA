@@ -599,7 +599,9 @@ def test_guard_whitelist_covers_guard_blocks():
     """④ 白名单完备性：名字像治理/守卫的 dict 块必须全部在册（漏纳 = surface 失明）。"""
     out = spec_check.scan_unlisted_guard_blocks()
     assert out["ok"] is True, out["reason"]
-    assert out["whitelist_total"] == 30
+    # 31 = 30（v3.54 终验冻结）+ 1（港股正式接入 HK_STOCK_CONFORMANCE：标的规格
+    # 治理面——每手/价位分表/印花税豁免/事件源，2026-11-26 版本内变更留痕）
+    assert out["whitelist_total"] == 31
 
 
 # ==================== v3.49 / 13.0.20：判据是白名单 ====================
@@ -612,7 +614,8 @@ def test_surface_whitelist_exact():
     assert conf["non_dict_block_action"] == "raise"
     assert conf["unlisted_guard_block_action"] == "raise"
     assert "whitelist_exclusions" in conf   # v3.51 ②：白名单纯净性规则就位
-    assert len(blocks) == len(set(blocks)) == 30
+    # 31 = 30（v3.54 终验冻结）+ 1（HK_STOCK_CONFORMANCE 港股标的规格治理面，2026-11-26）
+    assert len(blocks) == len(set(blocks)) == 31
     # 业务配置不得混进递归集合（CN_INDEX/MARKETS/BROKER_DEFAULT 等）
     for business in ("CN_INDEX", "MARKETS", "BROKER_DEFAULT", "INITIAL_CASH"):
         assert business not in blocks, f"业务配置 {business} 不得进入治理面白名单"
@@ -671,9 +674,11 @@ def test_ledger_covers_all_script_globs():
     out = spec_check.verify_acceptance_scripts()
     assert out["ok"] is True, out["reason"]
     globbed, registered = int(out["globbed"]), int(out["registered"])
-    # 50 = 49（v3.53 评审六轮冻结）+ 1（v3.54 评审七轮④ tests/test_future_roll.py：
-    # 期货换月平旧开新专项套件，账本 add 条目留痕）
-    assert globbed == 50, f"glob 命中 {globbed} 个验收脚本（9 根 + 40 tests + 1 checklist）"
+    # 51 = 50（v3.54 评审七轮冻结）+ 1（v3.54 港股正式接入：tests/test_hk_conformance.py
+    # 港股专项套件，账本 add 条目留痕）。scripts/verify_hk_*.py 不在 script_globs
+    # 范围（glob 只扫根目录 test_*.py + tests/test_*.py + checklist.py），
+    # 账本中的条目属受管范围外留痕，不计入 globbed
+    assert globbed == 51, f"glob 命中 {globbed} 个验收脚本（9 根 + 41 tests + 1 checklist）"
     assert out["coverage"] == f"{globbed}/{globbed}"
     assert registered >= globbed
 

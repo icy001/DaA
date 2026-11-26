@@ -947,6 +947,42 @@ FUTURE_BENCHMARK_MAP = {
     "IM": None,       # 中证1000全收益——代码待核实，禁止猜测；None=仅绝对收益
 }
 
+# 港股标的规格治理面（v3.54 港股正式接入，2026-11-26；来源=HKEX 官方
+# ListOfSecurities.xlsx（每手/价位分表/印花税义务/币种）+ 行情网格实测）：
+# - lot_sizes 每手股数为【标的属性】（港股不统一，02800=500 官方实测、00700=100
+#   官方×东财 F10 双源一致）；unknown_lot_action="reject"——未登记标的下单
+#   直接拒（禁止按市场默认 100 凭记忆放行）；
+# - spread_tables：正股 Part A（HKEX 价位表）沿用 MARKETS.hk_stock.price_step_table；
+#   ETF Part D 与正股不同（02800 在 [20,100) 区间实测 tick=0.02，正股表为 0.05），
+#   仅登记【实测覆盖带】，带外 unmeasured_action="raise" 禁止臆测；
+# - stamp_duty_exempt：02800 官方 Stamp Duty 列为空（ETF 豁免印花税）——
+#   市场级双边 0.1% 仅适用正股，豁免标的必须置 0（终验抓出错账源）；
+# - events_source：现金分红事件源（东财 stock_hk_dividend_payout_em）。02800
+#   的分派事件经 6 渠道实测均不可达（东财 F10 0 条/THS 失败/新浪停更 2016/
+#   aastocks 空/etnet 404/披露易公告标题泛化+Yahoo IP 封锁）→ None，
+#   events_unavailable_action="reject_adj"：无事件源的标的禁止生成 adj 双价
+#   序列（fail-closed，raw 模式回测并强制标注）；
+# - jump_audit：序列内 |隔夜|>25% 跳变必须能被事件表解释（拆股/大额分派），
+#   无解释直接 raise（00700 2014-05-29 一拆五 −78.64% 实证：东财表不含拆股
+#   事件，跨拆股段回测在补源前被结构性拦截）。
+HK_STOCK_CONFORMANCE = {
+    "authoritative_source": "HKEX ListOfSecurities.xlsx",
+    "lot_sizes": {"02800": 500, "00700": 100},
+    "unknown_lot_action": "reject",
+    "spread_parts": {"02800": "part_d", "00700": "part_a"},   # HKEX Spread Table 官方列
+    "unknown_spread_part_action": "part_a",
+    "spread_tables": {
+        "part_a": "MARKETS['hk_stock']['price_step_table']",
+        "part_d_measured": {"bands": [[20.0, 100.0, 0.02]],
+                            "source": "empirical_60min_grid_2026-11",
+                            "unmeasured_action": "raise"},
+    },
+    "stamp_duty_exempt": ["02800"],
+    "events_source": {"00700": "em_stock_hk_dividend_payout_em", "02800": None},
+    "events_unavailable_action": "reject_adj",
+    "jump_audit": {"threshold": 0.25, "action": "raise"},
+}
+
 def get_future_variety_params(symbol: str):
     variety = ''.join([c for c in symbol if c.isalpha()]).upper()
     p = MARKETS["cn_future"].copy()
@@ -2588,7 +2624,7 @@ CONFIG_SURFACE = {
         "INDICATOR_HARDENING", "INDICATOR_WARMUP_GUARD", "SNAPSHOT_PIT_GUARD",
         "EMPTY_REASON_PROVENANCE", "SPEC_DRAFT_PERMISSION", "SUITE_COVERAGE_GUARD",
         "NONDETERMINISTIC_SCRIPT_GUARD", "ACCEPTANCE_GOVERNANCE", "SPEC_PROVENANCE",
-        "CONFIG_SURFACE", "BACKTEST_DEFAULTS", "RISK",
+        "CONFIG_SURFACE", "BACKTEST_DEFAULTS", "RISK", "HK_STOCK_CONFORMANCE",
     ],
     "surface_hash_algo": "sha256",
     "surface_hash_file": "config_surface.sha256",

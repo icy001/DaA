@@ -71,6 +71,10 @@ _PERSIST_ATTR_KEYS = frozenset({
     "minute_factor_error", "minute_factor_rows",
     "dominant_contract", "dominant_roll",
     "lot_size", "stamp_duty_exempt",
+    # v3.54 港股自建双价出口（缓存命中后下游按 attrs 判别 raw-only/双价，
+    # 缺失即口径不明）：与 get_daily hk 缓存命中闸联动
+    "dual_price", "events_source", "n_events_applied", "adjust_reason",
+    "price_adjust", "currency",
 })
 
 

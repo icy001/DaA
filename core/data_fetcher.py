@@ -360,6 +360,14 @@ class _BsSessionExpired(RuntimeError):
     """BaoStock 会话失效（未登录 / 登录过期），由 _bs_execute 重置会话后重试。"""
 
 
+class JumpAuditError(RuntimeError):
+    """港股跳变审计拦截（|隔夜|>阈值且事件表无解释）。
+
+    属口径结构性拒绝而非网络失败：get_daily 的「返回过期缓存」兜底必须
+    放行本异常向上传播，禁止用子集缓存帧冒充全区间帧（fail-open）。
+    """
+
+
 
 
 class DataFetcher:
@@ -406,6 +414,12 @@ class DataFetcher:
         if market == "cn_index":
             # 指数无复权概念：缓存名显式标 none，避免把不复权价存成 qfq 误导下游
             adjust = "none"
+        if market == "hk_stock":
+            # 港股日线走自建双价出口（_fetch_hk_stock_daily）：fetch 固定 raw 取数、
+            # 双价在出口内构建，请求口径对出口帧无影响——缓存名统一标 none，
+            # 避免 qfq 文件名装 hfq_self_built/raw-only 内容造成口径错位
+            # （与 cn_index 同构处理，v3.54 港股正式接入）
+            adjust = "none"
 
         if market in _ADJ_MARKETS:
             raw = self._get_raw_daily(market, symbol, start, end)
@@ -426,6 +440,14 @@ class DataFetcher:
 
         cache_file = self._cache_path(market, symbol, "daily", adjust)
         cached = self._read_cache(cache_file)
+        if market == "hk_stock" and cached is not None and (
+                "dual_price" not in cached.attrs or "adjust" not in cached.attrs):
+            # 自建双价出口启用前的旧缓存缺双价标注：口径不明，fail-closed 拒读
+            # （00700 曾出现 21 行旧毒缓存被静默喂给下游），必须删除后重取
+            raise RuntimeError(
+                f"[hk_stock] {symbol} 日线缓存缺双价口径标注"
+                f"（dual_price/adjust，{cache_file.name}）："
+                "旧版缓存禁止静默读取，请删除该缓存文件后重取")
         if cached is not None and not self._cache_expired(cache_file, "daily") \
                 and self._covers(cached, start, end) \
                 and not self._last_bar_incomplete(cache_file, cached, market):
@@ -444,6 +466,8 @@ class DataFetcher:
             out = self._finalize(df, market, start, end, fill_missing)
             out.attrs.update(hint)
             return self._attach_asof(out)
+        except JumpAuditError:
+            raise    # 口径结构性拒绝：禁止被「返回过期缓存」兜底吞成 fail-open
         except Exception as exc:  # noqa: BLE001 - 接口失败不阻断，优先返回旧缓存
             if cached is not None:
                 stale = cached.loc[start:end].copy()
@@ -1669,20 +1693,103 @@ class DataFetcher:
 
     def _fetch_hk_stock_daily(self, symbol, start, end, adjust):
         code = str(symbol).zfill(5)
+        conf = getattr(config, "HK_STOCK_CONFORMANCE", {}) or {}
+        events_registry = {str(k).zfill(5): v for k, v in
+                           (conf.get("events_source") or {}).items()}
+        stamp_exempt = {str(x).zfill(5) for x in (conf.get("stamp_duty_exempt") or [])}
+        # 原始价固定 adjust=""（禁止消费数据源黑箱复权价；v3.54 港股接入）
         try:
             raw = self._request(ak.stock_hk_hist, symbol=code, period="daily",
-                                start_date=start, end_date=end, adjust=adjust or "",
+                                start_date=start, end_date=end, adjust="",
                                 _source="eastmoney")
             df = self._standardize(raw, interface="stock_hk_hist",
                                    market="hk_stock", symbol=code)
         except Exception as exc:  # noqa: BLE001 - 东财失败时改用新浪源
             self.logger.warning("stock_hk_hist 失败(%s)，改用 stock_hk_daily", exc)
-            raw = self._request(ak.stock_hk_daily, symbol=code, adjust=adjust or "",
+            raw = self._request(ak.stock_hk_daily, symbol=code, adjust="",
                                 _source="sina")
             df = self._standardize(raw, interface="stock_hk_daily",
                                    market="hk_stock", symbol=code).loc[start:end]
-        df.attrs["lot_size"] = self.get_hk_lot_size(code)
-        df.attrs["stamp_duty_exempt"] = True  # 港股 ETF 免印花税，个股按 config 收取
+        # 自建双价（事件表独立因子，与 A 股/期货双价体系同构）：
+        #   adj = raw × factor（信号/收益/权益），raw_* 列（撮合/费用/成交记录）
+        src_name = events_registry.get(code)
+        factor = pd.Series(1.0, index=df.index)
+        n_events = 0
+        if src_name == "em_stock_hk_dividend_payout_em":
+            try:
+                ev = self._request(ak.stock_hk_dividend_payout_em, symbol=code,
+                                   _source="eastmoney")
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"港股 {code} 事件源 em_stock_hk_dividend_payout_em 获取失败："
+                    f"{exc}（治理面 events_unavailable_action=reject_adj，"
+                    "禁止静默按零事件生成 adj 序列）") from exc
+            cum = 1.0
+            # 修复记录（v3.54 港股接入冒烟）：原写法 (ev or pd.DataFrame()) 对
+            # 非空 DataFrame 触发真值判断 ValueError，事件源可达时 00700 必崩
+            ev = ev if ev is not None and len(ev) > 0 else None
+            for _, r in (ev.iterrows() if ev is not None else []):
+                exd = pd.Timestamp(r.get("除净日"))
+                if pd.isna(exd) or exd not in df.index:
+                    continue
+                m = re.search(r"每股[派息]?港币([\d.]+)元|港币([\d.]+)元",
+                              str(r.get("分红方案") or ""))
+                div = float(m.group(1) or m.group(2)) if m else 0.0
+                if div <= 0:
+                    continue
+                pos = df.index.get_loc(exd)
+                if pos == 0:
+                    continue
+                prev_raw = float(df["close"].iloc[pos - 1])
+                if prev_raw <= div:
+                    continue
+                cum *= prev_raw / (prev_raw - div)
+                factor[factor.index >= exd] = cum
+                n_events += 1
+        # 跳变审计：|隔夜|>阈值 必须有事件解释（拆股/大额分派），否则拒绝
+        # （00700 2014-05-29 一拆五 −78.64% 实证：跨拆股段禁止静默生成 adj）
+        audit = conf.get("jump_audit") or {}
+        thr = float(audit.get("threshold") or 0.25)
+        adj_close = df["close"] * factor
+        jumps = adj_close.pct_change().abs()
+        unexplained = jumps[jumps > thr]
+        if len(unexplained) and str(audit.get("action") or "raise") == "raise":
+            first = unexplained.index[0]
+            raise JumpAuditError(
+                f"港股 {code} 序列存在无事件解释的 {thr:.0%} 以上跳变"
+                f"（首例 {first.date()} {float(jumps.loc[first]):+.2%}）："
+                "事件表不含对应拆股/分派记录，禁止生成被污染的 adj 序列"
+                "（jump_audit.action=raise）")
+        if src_name is None and n_events == 0:
+            # 无事件源标的（02800）：events_unavailable_action=reject_adj——
+            # 禁止生成 adj 双价序列，主列保持 raw 并强制标注（fail-closed）
+            if str(conf.get("events_unavailable_action") or "reject_adj") == "reject_adj":
+                df.attrs.update({
+                    "events_source": "unavailable",
+                    "dual_price": False,
+                    "adjust": "none",
+                    "adjust_reason": (f"{code} 分派事件源不可达（6 渠道实测），"
+                                      "治理面禁止 adj 序列；主列=raw 原始价"),
+                })
+            df.attrs["lot_size"] = self.get_hk_lot_size(code)
+            df.attrs["stamp_duty_exempt"] = code in stamp_exempt
+            df.attrs["price_adjust"] = "none"
+            df.attrs["currency"] = "HKD"
+            return df
+        for c in ("open", "high", "low", "close"):
+            df[f"raw_{c}"] = df[c]
+            df[c] = df[c] * factor
+        df["adj_factor"] = factor
+        df.attrs.update({
+            "events_source": src_name,
+            "n_events_applied": n_events,
+            "dual_price": True,
+            "adjust": "hfq_self_built",
+            "price_adjust": "hfq_self_built",
+            "lot_size": self.get_hk_lot_size(code),
+            "stamp_duty_exempt": code in stamp_exempt,
+            "currency": "HKD",
+        })
         return df
 
     def _fetch_cn_cb_daily(self, symbol, start, end, adjust):
@@ -3073,23 +3180,34 @@ class DataFetcher:
                 return rate
         return 0.0
 
-    def get_hk_lot_size(self, symbol: str) -> int:
-        """查询港股每手股数，查不到默认 100。"""
+    def get_hk_lot_size(self, symbol: str):
+        """港股每手股数：治理面标的属性优先（HKEX 官方实测登记）。
+
+        未登记标的返回 None（unknown）——由下单层按 HK_STOCK_CONFORMANCE.
+        unknown_lot_action 处置（当前=reject）；禁止按 100 凭记忆回退
+        （02800=500 官方实测证明标的差异真实存在）。
+        """
         code = str(symbol).zfill(5)
         if code in self._hk_lot_cache:
             return self._hk_lot_cache[code]
-        lot = 100
-        func = getattr(ak, "stock_hk_lot_size", None)
-        if func is not None:
-            try:
-                raw = self._request(func, symbol=code)
-                if isinstance(raw, pd.DataFrame) and not raw.empty:
-                    for col in raw.columns:
-                        if "每手" in str(col):
-                            lot = int(pd.to_numeric(raw.iloc[0][col], errors="coerce") or 100)
-                            break
-            except Exception as exc:  # noqa: BLE001
-                self.logger.debug("查询港股每手失败 %s: %s", code, exc)
+        conf = getattr(config, "HK_STOCK_CONFORMANCE", {}) or {}
+        registered = conf.get("lot_sizes") or {}
+        lot = None
+        if code in registered:
+            lot = int(registered[code])
+        else:
+            func = getattr(ak, "stock_hk_lot_size", None)
+            if func is not None:
+                try:
+                    raw = self._request(func, symbol=code)
+                    if isinstance(raw, pd.DataFrame) and not raw.empty:
+                        for col in raw.columns:
+                            if "每手" in str(col):
+                                lot = int(pd.to_numeric(
+                                    raw.iloc[0][col], errors="coerce") or 0) or None
+                                break
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.debug("查询港股每手失败 %s: %s", code, exc)
         self._hk_lot_cache[code] = lot
         return lot
 
@@ -3098,7 +3216,28 @@ class DataFetcher:
         market = market or config.detect_market_type(symbol)
         if market == "hk_stock":
             price = float(price or 0)
-            for upper, tick in _HK_TICK_MAP:
+            # 港股价位分表（v3.54 港股接入）：按 HKEX Spread Table 官方分类
+            # （spread_parts：700=Part A 正股表、02800=Part D ETF 分表——
+            # [20,100) 实测 0.02 vs 正股 0.05）；Part D 仅登记实测覆盖带，
+            # 带外 raise 禁止臆测
+            conf = getattr(config, "HK_STOCK_CONFORMANCE", {}) or {}
+            parts = {str(k).zfill(5): str(v) for k, v in
+                     (conf.get("spread_parts") or {}).items()}
+            part = parts.get(str(symbol).zfill(5),
+                             str(conf.get("unknown_spread_part_action") or "part_a"))
+            if part == "part_d":
+                part_d = ((conf.get("spread_tables") or {}).get("part_d_measured") or {})
+                for lo, hi, tick in part_d.get("bands") or []:
+                    if lo <= price < hi:
+                        return float(tick)
+                action = str(part_d.get("unmeasured_action") or "raise")
+                if action == "raise":
+                    raise ValueError(
+                        f"{symbol} 价格 {price} 不在 Part D 实测覆盖带内"
+                        f"（{part_d.get('bands')}）：价位未实测，禁止臆测"
+                        "（unmeasured_action=raise）")
+                return 0.05
+            for upper, tick in _HK_TICK_MAP:            # Part A 正股表
                 if price < upper:
                     return tick
             return 5.0
@@ -3119,10 +3258,16 @@ class DataFetcher:
         return float(config.get_market_config(market).get("price_step", 0.01))
 
     def is_stamp_duty_exempt(self, symbol: str, market: str = None) -> bool:
-        """ETF 与跨境品种免印花税。"""
+        """印花税豁免：cn/us 品种类豁免；港股按 HKEX 官方 Stamp Duty 列
+        （治理面 stamp_duty_exempt：02800 ETF 豁免、00700 正股应税——
+        旧版对 hk_stock 全市场一刀切豁免与官方口径矛盾，v3.54 修正）。"""
         market = market or config.detect_market_type(symbol)
-        if market in ("cn_etf", "us_stock", "us_etf", "hk_stock", "cn_fund"):
+        if market in ("cn_etf", "us_stock", "us_etf", "cn_fund"):
             return True
+        if market == "hk_stock":
+            conf = getattr(config, "HK_STOCK_CONFORMANCE", {}) or {}
+            return str(symbol).zfill(5) in {str(x).zfill(5) for x in
+                                            (conf.get("stamp_duty_exempt") or [])}
         return False
 
     # ==================== 数据质量 ====================
@@ -3175,7 +3320,10 @@ class DataFetcher:
         for extra in ("is_suspended", "is_missing"):
             if extra in out.columns:
                 cols = cols + [extra]
-        res = out[cols]
+        # 出口物化列随帧保留（v3.54 港股自建双价：raw_* 列 + adj_factor 列；
+        # 数据本体口径列禁止在质量检查中蒸发，attrs 只存标注、列才是数据）
+        extra_cols = [c for c in out.columns if c not in cols]
+        res = out[cols + extra_cols]
         res.attrs.update(df.attrs)  # 保留 source / unit_ratio 等溯源信息
         return res
 
