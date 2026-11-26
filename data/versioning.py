@@ -75,6 +75,9 @@ _PERSIST_ATTR_KEYS = frozenset({
     # 缺失即口径不明）：与 get_daily hk 缓存命中闸联动
     "dual_price", "events_source", "n_events_applied", "adjust_reason",
     "price_adjust", "currency",
+    # v3.54 港股接入修订轮（评审裁定）：跳变审计带无事件大波动日明细随帧
+    # 持久化——缓存命中后审计信息不蒸发，回测报告 meta.audit_warnings 同源
+    "audit_warnings",
 })
 
 

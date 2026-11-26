@@ -819,6 +819,14 @@ class Backtester:
         result.rejected = merged
         result.halt_state = (strategy.risk_manager.halt_state()
                              if getattr(strategy, "risk_manager", None) else {})
+        # 跳变审计带持久化（v3.54 港股修订轮评审裁定）：数据帧 attrs 的
+        # audit_warnings（无事件大波动日明细）随回测报告 meta 落盘，
+        # 验收直接查阅，禁止仅控制台日志
+        audit = {s: a for s in self.symbols
+                 for a in [getattr(self.frames.get(s), "attrs", {}).get("audit_warnings")]
+                 if a}
+        if audit:
+            result.meta["audit_warnings"] = audit
         result.run_mode = self.run_mode
         result.symbols = list(self.symbols)
         result.params = dict(strategy.params)

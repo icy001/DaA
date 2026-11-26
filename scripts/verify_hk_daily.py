@@ -108,11 +108,24 @@ def main() -> int:
         n_fill, n_rej = len(trades), len(rejected)
         m = result.metrics
         dual = bool(frame.attrs.get("dual_price"))
+        audit = result.meta.get("audit_warnings") or {}
+        halting = result.halt_state or {}
         print(f"bars={len(frame)}  双价={'是' if dual else '否(raw-only)'}  "
               f"耗时 {time.time()-t0:.0f}s")
         print(f"总收益 {m.get('total_return'):.4%}（分母=初始权益 {config.INITIAL_CASH:,.0f}）"
               f" | 最大回撤 {m.get('max_drawdown'):.2%} | 夏普 {m.get('sharpe')}")
+        # 固定汇率折算口径（0.8562 CNY/HKD，评审裁定基线；动态汇率+汇兑损益单列
+        # 为非阻塞后续项）
+        final_hkd = config.INITIAL_CASH * (1.0 + float(m.get("total_return") or 0))
+        print(f"权益终值 {final_hkd:,.2f} HKD ≈ {final_hkd*0.8562:,.2f} CNY"
+              f"（固定汇率 0.8562）")
         print(f"成交 {n_fill} | 拒单 {n_rej} | 决策日志 {len(decisions)}")
+        # 审计带持久化验证（评审补充要求：meta.audit_warnings 随回测报告落盘）
+        aw = audit.get(symbol) or []
+        print(f"审计带 meta.audit_warnings={len(aw)} 日（随回测报告持久化落盘）"
+              + (f"，明细：{'、'.join(x['date'] for x in aw)}" if aw else ""))
+        print(f"熔断状态：halted={halting.get('halted')}（触发 {halting.get('halt_since')}，"
+              f"原因：{halting.get('halt_reason') or '无'}）")
 
         # 1) LookaheadError
         print("✅ 1) LookaheadError = 0（引擎断言全程未触发）")

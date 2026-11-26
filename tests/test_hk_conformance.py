@@ -198,7 +198,9 @@ def test_hk_jump_audit_split_level_raises(monkeypatch):
 
 
 def test_hk_jump_audit_band_10pct_not_silent(monkeypatch, caplog):
-    """合成帧：10% 无事件跳变 → 不拦截（审计带），但必须落 WARNING 审计日志。
+    """合成帧：10% 无事件跳变 → 不拦截（审计带），但必须落 WARNING 审计日志
+    + attrs.audit_warnings 持久化（评审裁定：禁止仅控制台打印，随回测报告
+    meta.audit_warnings 落盘）。
 
     裁定要求「10% 无事件跳变报错」，实测否决：00700 全期 8 个 ≥10% 无事件日
     全为真实波动（2026-06-02 +10.46% 等），raise 会误拦 A 场景 00700；按
@@ -212,6 +214,10 @@ def test_hk_jump_audit_band_10pct_not_silent(monkeypatch, caplog):
     assert df.attrs["dual_price"] is True
     assert any("无事件审计带" in r.message for r in caplog.records), \
         "10% 无事件跳变必须落审计日志（禁止静默放行）"
+    aw = df.attrs.get("audit_warnings")
+    assert isinstance(aw, list) and len(aw) == 1, "审计带必须写入 attrs.audit_warnings"
+    assert aw[0]["date"].startswith("2026-01") and aw[0]["jump"] > 0.10, \
+        f"审计带明细含日期与幅度: {aw}"
 
 
 def test_hk_jump_audit_event_verify_line(monkeypatch):

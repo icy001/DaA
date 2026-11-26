@@ -1814,14 +1814,18 @@ class DataFetcher:
             "currency": "HKD",
         })
         if len(band):
-            # 无事件审计带（5%~25%）：逐日审计披露（attrs，随边车不持久化大列表——
-            # 只落日志与回执；实测该带与真实波动不可分，禁止静默）
-            detail = "、".join(f"{d.date()} {float(v):+.2%}"
-                               for d, v in band.items())
+            # 无事件审计带（5%~25%）：评审裁定要求强制持久化——既落 WARNING 日志，
+            # 也写入 attrs["audit_warnings"]（随边车持久化，回测引擎收集进
+            # result.meta.audit_warnings 随回测报告落盘），禁止仅控制台打印
+            detail = [{"date": str(d.date()), "jump": round(float(v), 6)}
+                      for d, v in band.items()]
+            df.attrs["audit_warnings"] = detail
             self.logger.warning(
                 "[hk_stock] %s 无事件审计带 %d 日（%.0f%%~%.0f%%，未拦截，"
-                "与真实波动不可分——明细须入回执）：%s",
-                code, len(band), thr_audit, thr_split, detail)
+                "与真实波动不可分——明细已写入 attrs.audit_warnings 随回测报告"
+                "落盘）：%s",
+                code, len(band), thr_audit, thr_split,
+                "、".join(f"{x['date']} {x['jump']:+.2%}" for x in detail))
         return df
 
     def _fetch_cn_cb_daily(self, symbol, start, end, adjust):
